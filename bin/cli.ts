@@ -1,13 +1,13 @@
 #!/usr/bin/env -S deno run --allow-read
 
 import { sql, SQLQuery } from "../mod.ts";
-import { parse } from "https://deno.land/std@0.221.0/flags/mod.ts";
+import { parseArgs } from "jsr:@std/cli/parse-args";
 
 /**
  * Parses command line arguments and builds an SQL query based on them
  */
 async function main() {
-  const args = parse(Deno.args, {
+  const args = parseArgs(Deno.args, {
     string: [
       "file",
       "query",
