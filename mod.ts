@@ -1,6 +1,33 @@
 /**
- * Represents the different parts of an SQL query
+ * A lightweight, raw SQL query builder that prioritizes SQL development through template literals, rather than abstracting SQL behind programming language constructs like traditional query builders.
+ *
+ * This module provides tools for building SQL queries safely and incrementally.
+ * It handles parameter interpolation automatically and helps prevent SQL injection.
+ *
+ * @example
+ * ```ts
+ * import { sql } from "psql-lib";
+ *
+ * // Basic query with parameters
+ * const userId = 123;
+ * const query = sql`SELECT * FROM users WHERE id = ${userId}`;
+ *
+ * // Incremental building with conditional clauses
+ * let baseQuery = sql`SELECT * FROM products`;
+ *
+ * if (category) {
+ *   baseQuery = baseQuery.sql`WHERE category = ${category}`;
+ * }
+ *
+ * if (minPrice) {
+ *   baseQuery = baseQuery.sql`AND price >= ${minPrice}`;
+ * }
+ *
+ * console.log(baseQuery.query); // The SQL string
+ * console.log(baseQuery.parameters); // The parameter values
+ *
  */
+
 interface QueryParts {
   /** SELECT fields */
   select: string[];
