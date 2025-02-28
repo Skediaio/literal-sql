@@ -25,17 +25,17 @@ A lightweight, raw SQL query builder that prioritizes SQL development through te
 
 Import directly in your code for each runtime:
 
-# Deno
+## Deno
 ```js
 import { sql } from "jsr:@skedia/literal-sql";
 ```
 
-# Node.js
+## Node.js
 ```sh
 npx jsr add @skedia/literal-sql
 ```
 
-# Bun
+## Bun
 ```sh
 bunx jsr add @skedia/literal-sql
 ```
