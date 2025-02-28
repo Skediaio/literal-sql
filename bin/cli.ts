@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-read
 
 /**
- * Command line interface for the psql-lib SQL Query Builder.
+ * Command line interface for the Literal SQL Query Builder.
  *
  * This module provides a CLI tool to build and manipulate SQL queries using
  * command line arguments. It allows reading SQL queries from files or direct input
@@ -128,7 +128,7 @@ async function main() {
 
 function printHelp() {
   console.log(`
-psql-lib CLI - SQL Query Builder
+Literal SQL CLI - SQL Query Builder
 
 USAGE:
   deno run --allow-read bin/cli.ts [OPTIONS]

@@ -6,7 +6,7 @@
  *
  * @example
  * ```ts
- * import { sql } from "psql-lib";
+ * import { sql } from "jsr:@skedia/literal-sql";
  *
  * // Basic query with parameters
  * const userId = 123;
