@@ -62,7 +62,7 @@ export class SQLQuery {
     // Process initial template literal
     if (strings && strings.length > 0) {
       const fullQuery = this._interpolate(strings, values);
-      this._parseInitialQuery(fullQuery);
+      this.parseInitialQuery(fullQuery);
     }
   }
 
@@ -112,16 +112,15 @@ export class SQLQuery {
    * Parses a query fragment and adds it to the appropriate query part
    *
    * @param query - The query fragment to parse
-   * @private
    */
-  private _parseQuery(query: string): void {
+  parseQuery(query: string): void {
     // Identify and classify the SQL fragment
     const trimmedQuery = query.trim();
     const lowerQuery = trimmedQuery.toLowerCase();
 
     if (lowerQuery.startsWith("select")) {
       // This is a SELECT statement - should not happen in append mode
-      this._parseInitialQuery(trimmedQuery);
+      this.parseInitialQuery(trimmedQuery);
     } else if (lowerQuery.startsWith("from")) {
       // FROM clause
       this.parts.from = trimmedQuery.substring(4).trim();
@@ -177,9 +176,8 @@ export class SQLQuery {
    * Parses a complete SQL query and initializes the query parts
    *
    * @param query - The complete SQL query to parse
-   * @private
    */
-  private _parseInitialQuery(query: string): void {
+  parseInitialQuery(query: string): void {
     const lines = query
       .split("\n")
       .map((line) => line.trim())
@@ -352,7 +350,7 @@ export class SQLQuery {
 
     // Parse and add the new fragment
     const fragment = newQuery._interpolate(strings, values);
-    newQuery._parseQuery(fragment);
+    newQuery.parseQuery(fragment);
 
     return newQuery;
   }

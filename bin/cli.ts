@@ -53,7 +53,7 @@ async function main() {
 
     // Initialize the SQL query
     let query = new SQLQuery();
-    query._parseInitialQuery(baseQuery);
+    query.parseInitialQuery(baseQuery);
 
     // Apply conditions in the order they were provided on the command line
     for (let i = 0; i < Deno.args.length; i++) {
@@ -61,7 +61,7 @@ async function main() {
 
       // Function to directly append SQL clauses without parameters
       const appendClause = (clause: string, condition: string) => {
-        query._parseQuery(`${clause} ${condition}`);
+        query.parseQuery(`${clause} ${condition}`);
         return query;
       };
 
