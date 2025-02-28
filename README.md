@@ -1,6 +1,6 @@
 # LiteralSQL 
 
-A lightweight, raw SQL query builder for Deno that prioritizes SQL development through template literals, rather than abstracting SQL behind programming language constructs like traditional query builders.
+A lightweight, raw SQL query builder that prioritizes SQL development through template literals, rather than abstracting SQL behind programming language constructs like traditional query builders.
 
 ## Features
 
@@ -11,7 +11,6 @@ A lightweight, raw SQL query builder for Deno that prioritizes SQL development t
 - Clean, formatted SQL output
 - Command-line interface for quickly mocking up queries and modifying existing SQL files
 - Zero dependencies
-- Works with any PostgreSQL client for Deno
 
 ## What It's Not
 
@@ -27,13 +26,19 @@ A lightweight, raw SQL query builder for Deno that prioritizes SQL development t
 Import directly in your code for each runtime:
 
 # Deno
+```js
 import { sql } from "jsr:@skedia/literal-sql";
+```
 
 # Node.js
+```sh
 npx jsr add @skedia/literal-sql
+```
 
 # Bun
+```sh
 bunx jsr add @skedia/literal-sql
+```
 
 ## Usage
 
@@ -144,7 +149,7 @@ Queries can be built incrementally by chaining `.sql` method calls:
 let query = sql`SELECT * FROM users`;
 
 // Conditionally add clauses
-if (filterByName) {
+if (name) {
   query = query.sql`WHERE name = ${name}`;
 }
 
@@ -183,7 +188,7 @@ The package includes a CLI for quickly mocking up queries or modifying existing 
 deno task cli --query "SELECT * FROM users" --where "active = true" --limit 10
 
 # Direct execution
-deno run --allow-read jsr:@maarten/psql-lib/cli --query "SELECT * FROM users" --where "active = true"
+deno run --allow-read jsr:@skedia/literal-sql/cli --query "SELECT * FROM users" --where "active = true"
 
 # From a local installation
 deno run --allow-read bin/cli.ts --help
