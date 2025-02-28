@@ -1,5 +1,24 @@
 #!/usr/bin/env -S deno run --allow-read
 
+/**
+ * Command line interface for the psql-lib SQL Query Builder.
+ *
+ * This module provides a CLI tool to build and manipulate SQL queries using
+ * command line arguments. It allows reading SQL queries from files or direct input
+ * and supports adding various SQL clauses such as WHERE, JOIN, ORDER BY, etc.
+ *
+ * @example
+ * ```ts
+ * // Read query from a file and add conditions
+ * deno run --allow-read bin/cli.ts --file query.sql --where "active = true"
+ *
+ * // Build a query from scratch
+ * deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --limit 10
+ * ```
+ *
+ * @module cli
+ */
+
 import { sql, SQLQuery } from "../mod.ts";
 import { parseArgs } from "jsr:@std/cli@1.0.13/parse-args";
 
