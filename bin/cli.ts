@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-read
 
 import { sql, SQLQuery } from "../mod.ts";
-import { parseArgs } from "jsr:@std/cli/parse-args";
+import { parseArgs } from "jsr:@std/cli@1.0.13/parse-args";
 
 /**
  * Parses command line arguments and builds an SQL query based on them
@@ -43,8 +43,10 @@ async function main() {
     if (args.file) {
       try {
         baseQuery = await Deno.readTextFile(args.file);
-      } catch (error) {
-        console.error(`Error reading file: ${error.message}`);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        console.error(`Error reading file: ${errorMessage}`);
         Deno.exit(1);
       }
     } else if (args.query) {
@@ -98,8 +100,9 @@ async function main() {
       console.log("\nParameters:");
       console.log(JSON.stringify(query.parameters, null, 2));
     }
-  } catch (error) {
-    console.error(`Error: ${error.message}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${errorMessage}`);
     Deno.exit(1);
   }
 }
