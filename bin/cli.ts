@@ -25,7 +25,7 @@ import { parseArgs } from "jsr:@std/cli@1.0.13/parse-args";
 /**
  * Builds an SQL query based on provided arguments
  */
-export async function buildQuery(argsList: string[]) {
+export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
   const args = parseArgs(argsList, {
     string: [
       "file",
