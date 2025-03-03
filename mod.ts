@@ -210,23 +210,42 @@ export class SQLQuery {
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line);
-
     let currentSection: string | null = null;
+
+    // Track parentheses for nested expressions
+    let parensCount = 0;
+    let currentExpression = "";
 
     for (const line of lines) {
       const lowerLine = line.toLowerCase();
-
       if (lowerLine.startsWith("select")) {
         currentSection = "select";
         // Extract all fields after SELECT
         const fieldsText = line.substring(6).trim();
+        // Count parentheses in the initial SELECT line
+        parensCount +=
+          (fieldsText.match(/\(/g) || []).length -
+          (fieldsText.match(/\)/g) || []).length;
+
         // Only add if there's content after SELECT
         if (fieldsText) {
-          this.parts.select = [fieldsText];
+          if (parensCount > 0) {
+            // Start of a multi-line expression
+            currentExpression = fieldsText;
+          } else {
+            this.parts.select = [fieldsText];
+          }
         } else {
           this.parts.select = [];
         }
       } else if (lowerLine.startsWith("from")) {
+        // Complete any pending expression
+        if (currentExpression) {
+          this.parts.select.push(currentExpression);
+          currentExpression = "";
+          parensCount = 0;
+        }
+
         currentSection = "from";
         this.parts.from = line.substring(4).trim();
       } else if (
@@ -253,14 +272,32 @@ export class SQLQuery {
       } else if (currentSection) {
         // Continuation of previous section
         if (currentSection === "select") {
-          // Remove any empty or just-comma lines
-          if (line !== "," && !line.match(/^\s*,\s*$/)) {
-            // Clean up any leading commas
-            const cleanedLine = line.replace(/^,\s*/, "");
-            // Clean up any trailing commas
-            const finalLine = cleanedLine.replace(/,\s*$/, "");
-            if (finalLine) {
-              this.parts.select.push(finalLine);
+          // Update parentheses count for the current line
+          const openParens = (line.match(/\(/g) || []).length;
+          const closeParens = (line.match(/\)/g) || []).length;
+          parensCount += openParens - closeParens;
+
+          if (parensCount > 0 || currentExpression) {
+            // We're inside a nested function expression
+            currentExpression += " " + line;
+
+            if (parensCount === 0 && currentExpression) {
+              // The expression is complete, add it to select parts
+              // Remove any trailing commas to avoid duplication
+              const trimmedExpr = currentExpression.trim().replace(/,\s*$/, "");
+              this.parts.select.push(trimmedExpr);
+              currentExpression = "";
+            }
+          } else {
+            // Not in a nested expression, handle as a regular field
+            if (line !== "," && !line.match(/^\s*,\s*$/)) {
+              // Clean up any leading commas
+              const cleanedLine = line.replace(/^,\s*/, "");
+              // Clean up any trailing commas
+              const finalLine = cleanedLine.replace(/,\s*$/, "");
+              if (finalLine) {
+                this.parts.select.push(finalLine);
+              }
             }
           }
         } else if (currentSection === "where") {
@@ -272,6 +309,13 @@ export class SQLQuery {
         }
       }
     }
+
+    // Process any remaining expression
+    if (currentExpression) {
+      // Remove any trailing commas to avoid duplication
+      const trimmedExpr = currentExpression.trim().replace(/,\s*$/, "");
+      this.parts.select.push(trimmedExpr);
+    }
   }
 
   /**
@@ -281,29 +325,28 @@ export class SQLQuery {
    */
   toString(): string {
     const parts: string[] = [];
-
     // SELECT
     if (this.parts.select.length > 0) {
-      parts.push(`SELECT\n  ${this.parts.select.join(",\n  ")}`);
+      // Make sure none of the select parts have trailing commas
+      const cleanedSelectParts = this.parts.select.map((part) =>
+        part.replace(/,\s*$/, ""),
+      );
+      parts.push(`SELECT\n  ${cleanedSelectParts.join(",\n  ")}`);
     } else {
       parts.push("SELECT *");
     }
-
     // FROM
     if (this.parts.from) {
       parts.push(`FROM ${this.parts.from}`);
     }
-
     // JOINs
     if (this.parts.joins.length > 0) {
       parts.push(this.parts.joins.join("\n"));
     }
-
     // WHERE
     if (this.parts.where.length > 0) {
       parts.push(`WHERE ${this.parts.where.join("\n  ")}`);
     }
-
     // GROUP BY
     if (this.parts.groupBy.length > 0) {
       // Filter out any undefined or empty strings
@@ -314,7 +357,6 @@ export class SQLQuery {
         parts.push(`GROUP BY ${validGroupBy.join(", ")}`);
       }
     }
-
     // ORDER BY
     if (this.parts.orderBy.length > 0) {
       // Filter out any undefined or empty strings
@@ -325,12 +367,10 @@ export class SQLQuery {
         parts.push(`ORDER BY ${validOrderBy.join(", ")}`);
       }
     }
-
     // LIMIT
     if (this.parts.limit !== null && !this.parts.limit.includes(":undefined")) {
       parts.push(`LIMIT ${this.parts.limit}`);
     }
-
     // OFFSET
     if (
       this.parts.offset !== null &&
@@ -338,10 +378,8 @@ export class SQLQuery {
     ) {
       parts.push(`OFFSET ${this.parts.offset}`);
     }
-
     return parts.join("\n");
   }
-
   /**
    * Gets the SQL query string
    *

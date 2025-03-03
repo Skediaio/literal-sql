@@ -371,6 +371,76 @@ Deno.test("Query immutability", () => {
   assertEquals(query2.toString(), "SELECT\n  * FROM users\nWHERE id = 1");
 });
 
+// Complex SQL function calls test
+Deno.test("Complex nested SQL functions with multiple commas", () => {
+  const date = "2025-05-12";
+  const query = sql`
+    SELECT
+      r.*,
+      row_to_json(c) as camp_info,
+      LOWER(
+        CONCAT(
+          r.firstname,
+          r.lastname,
+          REPLACE(REPLACE(TO_CHAR(r.birthDate, 'DDMMYYYY'), '-', ''), '/', '')
+        )
+      ) AS unique_id,
+      a.checked_in_at,
+      a.checked_out_at
+    FROM registrations r
+    LEFT JOIN periods p ON p.id = r.period_id
+    LEFT JOIN camps c ON c.id = r.camp_id
+    LEFT JOIN attendances a ON r.id = a.registration_id AND a.date = ${date}
+    WHERE p.from_date <= ${date}
+      AND p.until_date >= ${date}
+    ORDER BY r.firstname DESC
+  `;
+
+  // Verify the query includes parameter placeholders
+  assertEquals(query.toString().includes("$1"), true);
+
+  // Verify parameter is in parameters array
+  assertEquals(query.parameters[0], "2025-05-12");
+  // All three parameter placeholders should be the same value
+  assertEquals(query.parameters.length, 3);
+  assertEquals(query.parameters[1], "2025-05-12");
+  assertEquals(query.parameters[2], "2025-05-12");
+
+  const expected = [
+    "SELECT",
+    "  r.*,",
+    "  row_to_json(c) as camp_info,",
+    "  LOWER(",
+    "        CONCAT(",
+    "          r.firstname,",
+    "          r.lastname,",
+    "          REPLACE(REPLACE(TO_CHAR(r.birthDate, 'DDMMYYYY'), '-', ''), '/', '')",
+    "        )",
+    "      ) AS unique_id,",
+    "  a.checked_in_at,",
+    "  a.checked_out_at",
+    "FROM registrations r",
+    "LEFT JOIN periods p ON p.id = r.period_id",
+    "LEFT JOIN camps c ON c.id = r.camp_id",
+    "LEFT JOIN attendances a ON r.id = a.registration_id AND a.date = $1",
+    "WHERE p.from_date <= $2",
+    "  AND p.until_date >= $3",
+    "ORDER BY r.firstname DESC",
+  ].join("\n");
+
+  // Normalize both strings (remove extra whitespace to make comparison reliable)
+  const normalizedExpected = expected.replace(/\s+/g, " ").trim();
+  const normalizedActual = query.toString().replace(/\s+/g, " ").trim();
+
+  // Compare the normalized strings
+  assertEquals(
+    normalizedActual,
+    normalizedExpected,
+    "The generated SQL doesn't match the expected structure.\nActual: " +
+      query.toString(),
+  );
+});
+
 // Async usage pattern test
 Deno.test("Async usage pattern", async () => {
   // Simulate async data fetching
