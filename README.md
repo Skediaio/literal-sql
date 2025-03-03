@@ -6,7 +6,8 @@ A lightweight, raw SQL query builder that prioritizes SQL development through te
 
 - Simple, intuitive API using JavaScript template literals
 - SQL-focused development experience
-- Automatic parameter handling to prevent SQL injection (in the JS API, not the CLI)
+- PostgreSQL-compatible parameter handling ($1, $2, etc.) to prevent SQL injection (in the JS API, not the CLI)
+- Parameters returned as an array for direct use with node-postgres
 - Immutable query objects for safe, chainable modifications
 - Clean, formatted SQL output
 - Command-line interface for quickly mocking up queries and modifying existing SQL files
@@ -46,14 +47,6 @@ bunx jsr add @skedia/literal-sql
 import { sql } from "@skedia/literal-sql";
 
 // Build a basic query
-const query = sql`
-  SELECT 
-    id, 
-    name, 
-    email 
-  FROM users
-  WHERE id = ${userId}
-`;
 
 console.log(query.toString());
 // SELECT
@@ -61,10 +54,19 @@ console.log(query.toString());
 //   name,
 //   email
 // FROM users
-// WHERE id = :p0
+// WHERE id = $1
 
 console.log(query.parameters);
-// { p0: 123 }
+// [123]
+
+// Use with a PostgreSQL client (example with node-postgres)
+const result = await client.query(
+  query.toString(),
+  query.parameters
+);
+
+console.log(query.parameters);
+// [ 123 ]
 
 // Use with a PostgreSQL client (example with postgres.js)
 const result = await client.queryObject({
@@ -164,8 +166,8 @@ if (limit) {
 console.log(query.toString());
 console.log(query.parameters);
 ```
-
-### Immutability
+console.log(baseQuery.toString());    // Still just "SELECT * FROM users"
+console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = $1"
 
 All operations return a new query object, preserving the original:
 
@@ -174,7 +176,7 @@ const baseQuery = sql`SELECT * FROM users`;
 const filteredQuery = baseQuery.sql`WHERE active = ${true}`;
 
 console.log(baseQuery.toString());    // Still just "SELECT * FROM users"
-console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = :p0"
+console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = $1"
 ```
 
 ## Command Line Interface

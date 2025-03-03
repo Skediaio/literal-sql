@@ -19,14 +19,14 @@
  * @module cli
  */
 
-import { sql, SQLQuery } from "../mod.ts";
+import { SQLQuery } from "../mod.ts";
 import { parseArgs } from "jsr:@std/cli@1.0.13/parse-args";
 
 /**
- * Parses command line arguments and builds an SQL query based on them
+ * Builds an SQL query based on provided arguments
  */
-async function main() {
-  const args = parseArgs(Deno.args, {
+export async function buildQuery(argsList: string[]) {
+  const args = parseArgs(argsList, {
     string: [
       "file",
       "query",
@@ -111,18 +111,12 @@ async function main() {
       }
     }
 
-    // Output the query
-    console.log(query.toString());
-
-    // Output parameters if present and not empty
-    if (Object.keys(query.parameters).length > 0) {
-      console.log("\nParameters:");
-      console.log(JSON.stringify(query.parameters, null, 2));
-    }
+    // Return the query
+    return query;
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`Error: ${errorMessage}`);
-    Deno.exit(1);
+    throw error;
   }
 }
 
@@ -157,6 +151,28 @@ EXAMPLES:
   # Build a query from scratch
   deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
   `);
+}
+
+/**
+ * Parses command line arguments and builds an SQL query based on them
+ */
+async function main() {
+  try {
+    const query = await buildQuery(Deno.args);
+
+    // Output the query
+    console.log(query.toString());
+
+    // Output parameters if present and not empty
+    if (query.parameters.length > 0) {
+      console.log("\nParameters:");
+      console.log(JSON.stringify(query.parameters, null, 2));
+    }
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${errorMessage}`);
+    Deno.exit(1);
+  }
 }
 
 if (import.meta.main) {

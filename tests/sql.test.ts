@@ -1,9 +1,6 @@
 // Import the sql function
 import { sql } from "../mod.ts";
-import {
-  assertEquals,
-  assertObjectMatch,
-} from "https://deno.land/std@0.221.0/testing/asserts.ts";
+import { assertEquals } from "jsr:@std/assert";
 
 // Basic SELECT Tests
 Deno.test("Basic SELECT query", () => {
@@ -198,24 +195,26 @@ Deno.test("LIMIT and OFFSET together", () => {
 Deno.test("Parameters in WHERE clause", () => {
   const id = 1;
   const query = sql`SELECT * FROM users WHERE id = ${id}`;
-  assertEquals(query.toString().includes(":p0"), true);
-  assertEquals(query.parameters.p0, 1);
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.toString(), "SELECT\n  * FROM users WHERE id = $1");
+  assertEquals(query.parameters[0], 1);
 });
 
 Deno.test("Multiple parameters", () => {
   const id = 1;
   const name = "John";
   const query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.parameters.p1, "John");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.parameters[1], "John");
 });
 
 Deno.test("Parameters added with sql method", () => {
   const id = 1;
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = ${id}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.toString().includes(":p0"), true);
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.toString().includes("$1"), true);
 });
 
 Deno.test("Multiple parameters across multiple sql calls", () => {
@@ -224,17 +223,26 @@ Deno.test("Multiple parameters across multiple sql calls", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = ${id}`;
   query = query.sql`AND name = ${name}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.parameters.p1, "John");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(
+    query.toString(),
+    "SELECT\n  * FROM users\nWHERE id = $1\n  AND name = $2",
+  );
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.parameters[1], "John");
 });
 
 Deno.test("Skip undefined values", () => {
   const id = 1;
   const name = undefined;
   let query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name}`;
-  assertEquals(query.toString().includes(":p0"), true);
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString().includes("undefined"), false);
-  assertEquals(query.parameters.p0, 1);
+  assertEquals(
+    query.toString(),
+    "SELECT\n  * FROM users WHERE id = $1 AND name = NULL",
+  );
+  assertEquals(query.parameters[0], 1);
 });
 
 // Complex Query Tests
@@ -265,15 +273,16 @@ Deno.test("Complex query with all clauses", () => {
     "  created_at",
     "FROM users",
     "JOIN orders ON users.id = orders.user_id",
-    "WHERE name LIKE :p0",
+    "WHERE name LIKE $1",
     "GROUP BY users.id",
     "ORDER BY created_at DESC",
-    "LIMIT :p1",
+    "LIMIT $2",
   ].join("\n");
 
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString(), expected);
-  assertEquals(query.parameters.p0, "%John%");
-  assertEquals(query.parameters.p1, 10);
+  assertEquals(query.parameters[0], "%John%");
+  assertEquals(query.parameters[1], 10);
 });
 
 Deno.test("Building query conditionally", () => {
@@ -316,13 +325,14 @@ Deno.test("Building query conditionally", () => {
     "SELECT",
     "  * FROM users",
     "JOIN orders ON users.id = orders.user_id",
-    "WHERE name = :p0",
-    "LIMIT :p1",
+    "WHERE name = $1",
+    "LIMIT $2",
   ].join("\n");
 
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString(), expected);
-  assertEquals(query.parameters.p0, "John");
-  assertEquals(query.parameters.p1, 10);
+  assertEquals(query.parameters[0], "John");
+  assertEquals(query.parameters[1], 10);
 });
 
 // Edge case Tests
@@ -379,6 +389,7 @@ Deno.test("Async usage pattern", async () => {
   // Use the data in the query
   query = query.sql`WHERE name = ${user.name}`;
 
-  assertEquals(query.toString(), "SELECT\n  * FROM users\nWHERE name = :p0");
-  assertEquals(query.parameters.p0, "User 5");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.toString(), "SELECT\n  * FROM users\nWHERE name = $1");
+  assertEquals(query.parameters[0], "User 5");
 });
