@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.221.0/testing/asserts.ts";
+import { assertEquals } from "jsr:@std/assert";
 
 Deno.test({
   name: "CLI should parse a query and add conditions",
@@ -473,4 +473,3 @@ Deno.test({
     assertEquals(output.trim(), expected);
   },
 });
-

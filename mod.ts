@@ -8,9 +8,9 @@
  * ```ts
  * import { sql } from "jsr:@skedia/literal-sql";
  *
- * // Basic query with parameters
+ * // Basic query with parameters (will use $1 for PostgreSQL compatibility)
  * const userId = 123;
- * const query = sql`SELECT * FROM users WHERE id = ${userId}`;
+ * const query = sql`SELECT * FROM users WHERE id = ${userId}`; // generates: "SELECT * FROM users WHERE id = $1"
  *
  * // Incremental building with conditional clauses
  * let baseQuery = sql`SELECT * FROM products`;
@@ -23,8 +23,8 @@
  *   baseQuery = baseQuery.sql`AND price >= ${minPrice}`;
  * }
  *
- * console.log(baseQuery.query); // The SQL string
- * console.log(baseQuery.parameters); // The parameter values
+ * console.log(baseQuery.query); // The SQL string with $1, $2, etc. parameters
+ * console.log(baseQuery.parameters); // Array of parameter values
  *
  */
 
@@ -48,10 +48,11 @@ interface QueryParts {
 }
 
 /**
- * Represents query parameters for parameterized queries
+ * Internal interface for storing parameters before converting to array
+ * @private
  */
 interface Params {
-  [key: string]: any;
+  [key: number]: any;
 }
 
 /**
@@ -60,9 +61,9 @@ interface Params {
 export class SQLQuery {
   /** The different parts of the SQL query */
   parts: QueryParts;
-  /** The parameters for the parameterized query */
+  /** The parameters for the parameterized query (internal storage) */
   params: Params;
-  /** Counter for generating parameter names */
+  /** Counter for generating parameter numbers ($1, $2, etc.) */
   paramCounter: number;
 
   /**
@@ -106,27 +107,27 @@ export class SQLQuery {
       if (i < values.length) {
         const value = values[i];
 
-        // Skip undefined values
+        // Handle undefined values by replacing with NULL
         if (value === undefined) {
-          return result + string;
+          return result + string + "NULL";
         }
 
         // Handle parameter values
         if (value !== null && typeof value !== "object") {
-          // For primitive values, create a parameter
-          const paramName = `p${this.paramCounter++}`;
-          this.params[paramName] = value;
-          return result + string + `:${paramName}`;
+          // For primitive values, create a numbered parameter
+          this.paramCounter++;
+          this.params[this.paramCounter] = value;
+          return result + string + `$${this.paramCounter}`;
         } else if (
           value !== null &&
           typeof value === "object" &&
           !(value instanceof SQLQuery)
         ) {
-          // Handle parameter objects
-          Object.entries(value).forEach(([key, val]) => {
-            this.params[key] = val;
-          });
-          return result + string + `:${Object.keys(value)[0]}`;
+          // Handle parameter objects - convert to numbered parameters
+          this.paramCounter++;
+          const paramValue = Object.values(value)[0];
+          this.params[this.paramCounter] = paramValue;
+          return result + string + `$${this.paramCounter}`;
         } else {
           return result + string + value;
         }
@@ -209,23 +210,42 @@ export class SQLQuery {
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line);
-
     let currentSection: string | null = null;
+
+    // Track parentheses for nested expressions
+    let parensCount = 0;
+    let currentExpression = "";
 
     for (const line of lines) {
       const lowerLine = line.toLowerCase();
-
       if (lowerLine.startsWith("select")) {
         currentSection = "select";
         // Extract all fields after SELECT
         const fieldsText = line.substring(6).trim();
+        // Count parentheses in the initial SELECT line
+        parensCount +=
+          (fieldsText.match(/\(/g) || []).length -
+          (fieldsText.match(/\)/g) || []).length;
+
         // Only add if there's content after SELECT
         if (fieldsText) {
-          this.parts.select = [fieldsText];
+          if (parensCount > 0) {
+            // Start of a multi-line expression
+            currentExpression = fieldsText;
+          } else {
+            this.parts.select = [fieldsText];
+          }
         } else {
           this.parts.select = [];
         }
       } else if (lowerLine.startsWith("from")) {
+        // Complete any pending expression
+        if (currentExpression) {
+          this.parts.select.push(currentExpression);
+          currentExpression = "";
+          parensCount = 0;
+        }
+
         currentSection = "from";
         this.parts.from = line.substring(4).trim();
       } else if (
@@ -252,14 +272,32 @@ export class SQLQuery {
       } else if (currentSection) {
         // Continuation of previous section
         if (currentSection === "select") {
-          // Remove any empty or just-comma lines
-          if (line !== "," && !line.match(/^\s*,\s*$/)) {
-            // Clean up any leading commas
-            const cleanedLine = line.replace(/^,\s*/, "");
-            // Clean up any trailing commas
-            const finalLine = cleanedLine.replace(/,\s*$/, "");
-            if (finalLine) {
-              this.parts.select.push(finalLine);
+          // Update parentheses count for the current line
+          const openParens = (line.match(/\(/g) || []).length;
+          const closeParens = (line.match(/\)/g) || []).length;
+          parensCount += openParens - closeParens;
+
+          if (parensCount > 0 || currentExpression) {
+            // We're inside a nested function expression
+            currentExpression += " " + line;
+
+            if (parensCount === 0 && currentExpression) {
+              // The expression is complete, add it to select parts
+              // Remove any trailing commas to avoid duplication
+              const trimmedExpr = currentExpression.trim().replace(/,\s*$/, "");
+              this.parts.select.push(trimmedExpr);
+              currentExpression = "";
+            }
+          } else {
+            // Not in a nested expression, handle as a regular field
+            if (line !== "," && !line.match(/^\s*,\s*$/)) {
+              // Clean up any leading commas
+              const cleanedLine = line.replace(/^,\s*/, "");
+              // Clean up any trailing commas
+              const finalLine = cleanedLine.replace(/,\s*$/, "");
+              if (finalLine) {
+                this.parts.select.push(finalLine);
+              }
             }
           }
         } else if (currentSection === "where") {
@@ -271,6 +309,13 @@ export class SQLQuery {
         }
       }
     }
+
+    // Process any remaining expression
+    if (currentExpression) {
+      // Remove any trailing commas to avoid duplication
+      const trimmedExpr = currentExpression.trim().replace(/,\s*$/, "");
+      this.parts.select.push(trimmedExpr);
+    }
   }
 
   /**
@@ -280,29 +325,28 @@ export class SQLQuery {
    */
   toString(): string {
     const parts: string[] = [];
-
     // SELECT
     if (this.parts.select.length > 0) {
-      parts.push(`SELECT\n  ${this.parts.select.join(",\n  ")}`);
+      // Make sure none of the select parts have trailing commas
+      const cleanedSelectParts = this.parts.select.map((part) =>
+        part.replace(/,\s*$/, ""),
+      );
+      parts.push(`SELECT\n  ${cleanedSelectParts.join(",\n  ")}`);
     } else {
       parts.push("SELECT *");
     }
-
     // FROM
     if (this.parts.from) {
       parts.push(`FROM ${this.parts.from}`);
     }
-
     // JOINs
     if (this.parts.joins.length > 0) {
       parts.push(this.parts.joins.join("\n"));
     }
-
     // WHERE
     if (this.parts.where.length > 0) {
       parts.push(`WHERE ${this.parts.where.join("\n  ")}`);
     }
-
     // GROUP BY
     if (this.parts.groupBy.length > 0) {
       // Filter out any undefined or empty strings
@@ -313,7 +357,6 @@ export class SQLQuery {
         parts.push(`GROUP BY ${validGroupBy.join(", ")}`);
       }
     }
-
     // ORDER BY
     if (this.parts.orderBy.length > 0) {
       // Filter out any undefined or empty strings
@@ -324,12 +367,10 @@ export class SQLQuery {
         parts.push(`ORDER BY ${validOrderBy.join(", ")}`);
       }
     }
-
     // LIMIT
     if (this.parts.limit !== null && !this.parts.limit.includes(":undefined")) {
       parts.push(`LIMIT ${this.parts.limit}`);
     }
-
     // OFFSET
     if (
       this.parts.offset !== null &&
@@ -337,10 +378,8 @@ export class SQLQuery {
     ) {
       parts.push(`OFFSET ${this.parts.offset}`);
     }
-
     return parts.join("\n");
   }
-
   /**
    * Gets the SQL query string
    *
@@ -351,12 +390,24 @@ export class SQLQuery {
   }
 
   /**
-   * Gets the parameters for the parameterized query
+   * Gets the parameters for the parameterized query as an array,
+   * compatible with node-postgres expectations
    *
-   * @returns The query parameters
+   * @returns The query parameters as an array
    */
-  get parameters(): Params {
-    return this.params;
+  get parameters(): any[] {
+    // Check if there are any parameters
+    if (Object.keys(this.params).length === 0) {
+      return [];
+    }
+
+    // Convert the numbered object params to an array
+    const maxParam = Math.max(...Object.keys(this.params).map(Number));
+    const paramsArray = new Array(maxParam);
+    for (let i = 1; i <= maxParam; i++) {
+      paramsArray[i - 1] = this.params[i];
+    }
+    return paramsArray;
   }
 
   /**
@@ -399,7 +450,7 @@ export class SQLQuery {
  *   query = query.sql`WHERE user_id = ${userId}`;
  * }
  *
- * // Chain multiple conditions safely
+ * // Chain multiple conditions safely (parameters will be $1, $2)
  * if (searchTerm) {
  *   query = query.sql`AND (name ILIKE ${'%' + searchTerm + '%'} OR email ILIKE ${'%' + searchTerm + '%'})`;
  * }

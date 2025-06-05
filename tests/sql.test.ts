@@ -1,9 +1,6 @@
 // Import the sql function
 import { sql } from "../mod.ts";
-import {
-  assertEquals,
-  assertObjectMatch,
-} from "https://deno.land/std@0.221.0/testing/asserts.ts";
+import { assertEquals } from "jsr:@std/assert";
 
 // Basic SELECT Tests
 Deno.test("Basic SELECT query", () => {
@@ -198,24 +195,26 @@ Deno.test("LIMIT and OFFSET together", () => {
 Deno.test("Parameters in WHERE clause", () => {
   const id = 1;
   const query = sql`SELECT * FROM users WHERE id = ${id}`;
-  assertEquals(query.toString().includes(":p0"), true);
-  assertEquals(query.parameters.p0, 1);
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.toString(), "SELECT\n  * FROM users WHERE id = $1");
+  assertEquals(query.parameters[0], 1);
 });
 
 Deno.test("Multiple parameters", () => {
   const id = 1;
   const name = "John";
   const query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.parameters.p1, "John");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.parameters[1], "John");
 });
 
 Deno.test("Parameters added with sql method", () => {
   const id = 1;
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = ${id}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.toString().includes(":p0"), true);
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.toString().includes("$1"), true);
 });
 
 Deno.test("Multiple parameters across multiple sql calls", () => {
@@ -224,17 +223,26 @@ Deno.test("Multiple parameters across multiple sql calls", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = ${id}`;
   query = query.sql`AND name = ${name}`;
-  assertEquals(query.parameters.p0, 1);
-  assertEquals(query.parameters.p1, "John");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(
+    query.toString(),
+    "SELECT\n  * FROM users\nWHERE id = $1\n  AND name = $2",
+  );
+  assertEquals(query.parameters[0], 1);
+  assertEquals(query.parameters[1], "John");
 });
 
 Deno.test("Skip undefined values", () => {
   const id = 1;
   const name = undefined;
   let query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name}`;
-  assertEquals(query.toString().includes(":p0"), true);
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString().includes("undefined"), false);
-  assertEquals(query.parameters.p0, 1);
+  assertEquals(
+    query.toString(),
+    "SELECT\n  * FROM users WHERE id = $1 AND name = NULL",
+  );
+  assertEquals(query.parameters[0], 1);
 });
 
 // Complex Query Tests
@@ -265,15 +273,16 @@ Deno.test("Complex query with all clauses", () => {
     "  created_at",
     "FROM users",
     "JOIN orders ON users.id = orders.user_id",
-    "WHERE name LIKE :p0",
+    "WHERE name LIKE $1",
     "GROUP BY users.id",
     "ORDER BY created_at DESC",
-    "LIMIT :p1",
+    "LIMIT $2",
   ].join("\n");
 
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString(), expected);
-  assertEquals(query.parameters.p0, "%John%");
-  assertEquals(query.parameters.p1, 10);
+  assertEquals(query.parameters[0], "%John%");
+  assertEquals(query.parameters[1], 10);
 });
 
 Deno.test("Building query conditionally", () => {
@@ -316,13 +325,14 @@ Deno.test("Building query conditionally", () => {
     "SELECT",
     "  * FROM users",
     "JOIN orders ON users.id = orders.user_id",
-    "WHERE name = :p0",
-    "LIMIT :p1",
+    "WHERE name = $1",
+    "LIMIT $2",
   ].join("\n");
 
+  assertEquals(query.toString().includes("$1"), true);
   assertEquals(query.toString(), expected);
-  assertEquals(query.parameters.p0, "John");
-  assertEquals(query.parameters.p1, 10);
+  assertEquals(query.parameters[0], "John");
+  assertEquals(query.parameters[1], 10);
 });
 
 // Edge case Tests
@@ -361,6 +371,76 @@ Deno.test("Query immutability", () => {
   assertEquals(query2.toString(), "SELECT\n  * FROM users\nWHERE id = 1");
 });
 
+// Complex SQL function calls test
+Deno.test("Complex nested SQL functions with multiple commas", () => {
+  const date = "2025-05-12";
+  const query = sql`
+    SELECT
+      r.*,
+      row_to_json(c) as camp_info,
+      LOWER(
+        CONCAT(
+          r.firstname,
+          r.lastname,
+          REPLACE(REPLACE(TO_CHAR(r.birthDate, 'DDMMYYYY'), '-', ''), '/', '')
+        )
+      ) AS unique_id,
+      a.checked_in_at,
+      a.checked_out_at
+    FROM registrations r
+    LEFT JOIN periods p ON p.id = r.period_id
+    LEFT JOIN camps c ON c.id = r.camp_id
+    LEFT JOIN attendances a ON r.id = a.registration_id AND a.date = ${date}
+    WHERE p.from_date <= ${date}
+      AND p.until_date >= ${date}
+    ORDER BY r.firstname DESC
+  `;
+
+  // Verify the query includes parameter placeholders
+  assertEquals(query.toString().includes("$1"), true);
+
+  // Verify parameter is in parameters array
+  assertEquals(query.parameters[0], "2025-05-12");
+  // All three parameter placeholders should be the same value
+  assertEquals(query.parameters.length, 3);
+  assertEquals(query.parameters[1], "2025-05-12");
+  assertEquals(query.parameters[2], "2025-05-12");
+
+  const expected = [
+    "SELECT",
+    "  r.*,",
+    "  row_to_json(c) as camp_info,",
+    "  LOWER(",
+    "        CONCAT(",
+    "          r.firstname,",
+    "          r.lastname,",
+    "          REPLACE(REPLACE(TO_CHAR(r.birthDate, 'DDMMYYYY'), '-', ''), '/', '')",
+    "        )",
+    "      ) AS unique_id,",
+    "  a.checked_in_at,",
+    "  a.checked_out_at",
+    "FROM registrations r",
+    "LEFT JOIN periods p ON p.id = r.period_id",
+    "LEFT JOIN camps c ON c.id = r.camp_id",
+    "LEFT JOIN attendances a ON r.id = a.registration_id AND a.date = $1",
+    "WHERE p.from_date <= $2",
+    "  AND p.until_date >= $3",
+    "ORDER BY r.firstname DESC",
+  ].join("\n");
+
+  // Normalize both strings (remove extra whitespace to make comparison reliable)
+  const normalizedExpected = expected.replace(/\s+/g, " ").trim();
+  const normalizedActual = query.toString().replace(/\s+/g, " ").trim();
+
+  // Compare the normalized strings
+  assertEquals(
+    normalizedActual,
+    normalizedExpected,
+    "The generated SQL doesn't match the expected structure.\nActual: " +
+      query.toString(),
+  );
+});
+
 // Async usage pattern test
 Deno.test("Async usage pattern", async () => {
   // Simulate async data fetching
@@ -379,6 +459,7 @@ Deno.test("Async usage pattern", async () => {
   // Use the data in the query
   query = query.sql`WHERE name = ${user.name}`;
 
-  assertEquals(query.toString(), "SELECT\n  * FROM users\nWHERE name = :p0");
-  assertEquals(query.parameters.p0, "User 5");
+  assertEquals(query.toString().includes("$1"), true);
+  assertEquals(query.toString(), "SELECT\n  * FROM users\nWHERE name = $1");
+  assertEquals(query.parameters[0], "User 5");
 });
