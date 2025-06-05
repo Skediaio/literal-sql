@@ -1,6 +1,14 @@
+
 # LiteralSQL 
 
 A lightweight, raw SQL query builder that prioritizes SQL development through template literals, rather than abstracting SQL behind programming language constructs like traditional query builders.
+
+
+> ⚠️ **ALPHA SOFTWARE - USE WITH CAUTION** ⚠️
+>
+> This library is a **Work in Progress (WIP)** and is **NOT ready for production use**.
+> Expect bugs, breaking changes, and incomplete features. It might not be finished.
+> **Use at your own risk!**
 
 ## Features
 
