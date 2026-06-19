@@ -1,6 +1,6 @@
 {
   "name": "@skedia/literal-sql",
-  "version": "0.0.7",
+  "version": "0.1.0",
   "exports": {
     ".": "./mod.ts",
     "./cli": "./bin/cli.ts"
@@ -14,10 +14,12 @@
     "singleQuote": false
   },
   "exclude": [
-    ".git"
+    ".git",
+    ".opencode"
   ],
   "tasks": {
-    "test": "deno test tests/",
+    "test": "deno test tests/ --allow-read --allow-write --allow-run",
+    "test:sql": "deno test tests/sql.test.ts",
     "check": "deno check **/*.ts",
     "cli": "deno run --allow-read bin/cli.ts"
   }

@@ -63,8 +63,9 @@ export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
       try {
         baseQuery = await Deno.readTextFile(args.file);
       } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        const errorMessage = error instanceof Error
+          ? error.message
+          : String(error);
         console.error(`Error reading file: ${errorMessage}`);
         Deno.exit(1);
       }

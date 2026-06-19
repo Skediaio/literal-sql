@@ -1,7 +1,8 @@
+# LiteralSQL
 
-# LiteralSQL 
-
-A lightweight, raw SQL query builder that prioritizes SQL development through template literals, rather than abstracting SQL behind programming language constructs like traditional query builders.
+A lightweight, raw SQL query builder that prioritizes SQL development through
+template literals, rather than abstracting SQL behind programming language
+constructs like traditional query builders.
 
 
 > ⚠️ **ALPHA SOFTWARE - USE WITH CAUTION** ⚠️
@@ -14,19 +15,25 @@ A lightweight, raw SQL query builder that prioritizes SQL development through te
 
 - Simple, intuitive API using JavaScript template literals
 - SQL-focused development experience
-- PostgreSQL-compatible parameter handling ($1, $2, etc.) to prevent SQL injection (in the JS API, not the CLI)
+- PostgreSQL-compatible parameter handling ($1, $2, etc.) to prevent SQL
+  injection (in the JS API, not the CLI)
 - Parameters returned as an array for direct use with node-postgres
 - Immutable query objects for safe, chainable modifications
 - Clean, formatted SQL output
-- Command-line interface for quickly mocking up queries and modifying existing SQL files
+- Command-line interface for quickly mocking up queries and modifying existing
+  SQL files
 - Zero dependencies
 
 ## What It's Not
 
-- **Not an ORM**: This library doesn't handle database connections or execute queries for you
-- **Not a query executor**: You need to pass the generated SQL and parameters to your database client yourself
-- **Not an abstraction layer**: It intentionally exposes raw SQL rather than hiding it behind methods
-- **Not a schema manager**: There are no migrations or schema definitions included
+- **Not an ORM**: This library doesn't handle database connections or execute
+  queries for you
+- **Not a query executor**: You need to pass the generated SQL and parameters to
+  your database client yourself
+- **Not an abstraction layer**: It intentionally exposes raw SQL rather than
+  hiding it behind methods
+- **Not a schema manager**: There are no migrations or schema definitions
+  included
 
 ## Installation
 
@@ -35,16 +42,19 @@ A lightweight, raw SQL query builder that prioritizes SQL development through te
 Import directly in your code for each runtime:
 
 ## Deno
+
 ```js
 import { sql } from "jsr:@skedia/literal-sql";
 ```
 
 ## Node.js
+
 ```sh
 npx jsr add @skedia/literal-sql
 ```
 
 ## Bun
+
 ```sh
 bunx jsr add @skedia/literal-sql
 ```
@@ -70,7 +80,7 @@ console.log(query.parameters);
 // Use with a PostgreSQL client (example with node-postgres)
 const result = await client.query(
   query.toString(),
-  query.parameters
+  query.parameters,
 );
 
 console.log(query.parameters);
@@ -87,27 +97,29 @@ const result = await client.queryObject({
 
 ### The Problem with Traditional Query Builders
 
-Most query builders like Knex and Kysely focus on abstracting SQL into JavaScript/TypeScript method chains:
+Most query builders like Knex and Kysely focus on abstracting SQL into
+JavaScript/TypeScript method chains:
 
 ```ts
 // Knex example
-knex('users')
-  .select('id', 'name', 'email')
-  .where('active', true)
-  .andWhere('created_at', '>', '2023-01-01')
-  .orderBy('last_login', 'desc')
+knex("users")
+  .select("id", "name", "email")
+  .where("active", true)
+  .andWhere("created_at", ">", "2023-01-01")
+  .orderBy("last_login", "desc")
   .limit(10);
 
 // Kysely example
-db.selectFrom('users')
-  .select(['id', 'name', 'email'])
-  .where('active', '=', true)
-  .where('created_at', '>', '2023-01-01')
-  .orderBy('last_login', 'desc')
+db.selectFrom("users")
+  .select(["id", "name", "email"])
+  .where("active", "=", true)
+  .where("created_at", ">", "2023-01-01")
+  .orderBy("last_login", "desc")
   .limit(10);
 ```
 
 While these provide type safety, they come with drawbacks:
+
 - You have to learn the query builder's API instead of using your SQL knowledge
 - Complex queries often require awkward workarounds
 - You frequently end up writing raw SQL for advanced features anyway
@@ -130,6 +142,7 @@ const query = `
 ```
 
 This leads to:
+
 - String concatenation that's error-prone and unsafe
 - Manual parameter handling to prevent SQL injection
 - Messy conditionals that break SQL formatting
@@ -138,14 +151,17 @@ This leads to:
 ### Our Solution
 
 This library gives you the best of both worlds:
+
 - Write real SQL directly using template literals
 - Get automatic parameter handling for safety
 - Build queries incrementally with clean conditionals
 - Keep your SQL formatted and readable
 - No need to learn a new API if you already know SQL
-- Store your SQL in sql files and just read them and add some conditional statements
+- Store your SQL in sql files and just read them and add some conditional
+  statements
 
 It's ideal for developers who:
+
 - Prefer working directly with SQL syntax
 - Need to build complex queries programmatically
 - Want clean, readable code without string concatenation
@@ -174,8 +190,6 @@ if (limit) {
 console.log(query.toString());
 console.log(query.parameters);
 ```
-console.log(baseQuery.toString());    // Still just "SELECT * FROM users"
-console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = $1"
 
 All operations return a new query object, preserving the original:
 
@@ -183,13 +197,15 @@ All operations return a new query object, preserving the original:
 const baseQuery = sql`SELECT * FROM users`;
 const filteredQuery = baseQuery.sql`WHERE active = ${true}`;
 
-console.log(baseQuery.toString());    // Still just "SELECT * FROM users"
+console.log(baseQuery.toString()); // Still just "SELECT * FROM users"
 console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = $1"
 ```
 
 ## Command Line Interface
 
-The package includes a CLI for quickly mocking up queries or modifying existing SQL files. This is useful when you have a large SQL query file and need to add conditions or clauses for testing purposes.
+The package includes a CLI for quickly mocking up queries or modifying existing
+SQL files. This is useful when you have a large SQL query file and need to add
+conditions or clauses for testing purposes.
 
 ### Running the CLI
 
@@ -227,11 +243,13 @@ OPTIONS:
 ### CLI Examples
 
 Build a query from a file:
+
 ```sh
 deno run --allow-read bin/cli.ts --file query.sql --where "active = true" --and "created_at > '2023-01-01'"
 ```
 
 Build a query from scratch:
+
 ```sh
 deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
 ```

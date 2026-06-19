@@ -33,15 +33,18 @@ Deno.test({
         stderr: "piped",
       });
 
-      const { stdout, stderr } = await command.output();
+      const { stdout } = await command.output();
       const output = new TextDecoder().decode(stdout);
-      const error = new TextDecoder().decode(stderr);
 
       // Check for expected output
       const expected = [
         "SELECT",
-        "  id, name FROM users",
-        "WHERE active = true",
+        "  id,",
+        "  name",
+        "FROM",
+        "  users",
+        "WHERE",
+        "  active = true",
         "LIMIT 10",
       ].join("\n");
 
@@ -89,9 +92,13 @@ Deno.test({
     // Check for expected output
     const expected = [
       "SELECT",
-      "  * FROM products",
-      "WHERE price > 100",
-      "ORDER BY name ASC",
+      "  *",
+      "FROM",
+      "  products",
+      "WHERE",
+      "  price > 100",
+      "ORDER BY",
+      "  name ASC",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -125,8 +132,12 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  users.name, orders.amount FROM users",
-      "JOIN orders ON users.id = orders.user_id",
+      "  users.name,",
+      "  orders.amount",
+      "FROM",
+      "  users",
+      "JOIN",
+      "  orders ON users.id = orders.user_id",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -162,9 +173,14 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  users.*, orders.* FROM users",
-      "LEFT JOIN orders ON users.id = orders.user_id",
-      "RIGHT JOIN user_profiles ON users.id = user_profiles.user_id",
+      "  users.*,",
+      "  orders.*",
+      "FROM",
+      "  users",
+      "LEFT JOIN",
+      "  orders ON users.id = orders.user_id",
+      "RIGHT JOIN",
+      "  user_profiles ON users.id = user_profiles.user_id",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -198,8 +214,12 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  department, COUNT(*) as employee_count FROM employees",
-      "GROUP BY department",
+      "  department,",
+      "  COUNT(*) as employee_count",
+      "FROM",
+      "  employees",
+      "GROUP BY",
+      "  department",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -235,9 +255,13 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  * FROM products",
-      "WHERE price > 50",
-      "  AND category = 'electronics'",
+      "  *",
+      "FROM",
+      "  products",
+      "WHERE",
+      "  price > 50",
+      "AND",
+      "  category = 'electronics'",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -273,9 +297,13 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  * FROM products",
-      "WHERE price < 20",
-      "  OR on_sale = true",
+      "  *",
+      "FROM",
+      "  products",
+      "WHERE",
+      "  price < 20",
+      "OR",
+      "  on_sale = true",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -313,8 +341,11 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  * FROM logs",
-      "ORDER BY created_at DESC",
+      "  *",
+      "FROM",
+      "  logs",
+      "ORDER BY",
+      "  created_at DESC",
       "LIMIT 100",
       "OFFSET 200",
     ].join("\n");
@@ -373,10 +404,19 @@ Deno.test({
         "  id,",
         "  first_name,",
         "  last_name,",
-        "  CONCAT(first_name, ' ', last_name) as full_name,",
-        "  DATE_FORMAT(created_at, '%Y-%m-%d') as joined_date",
-        "FROM users",
-        "WHERE active = true",
+        "  CONCAT(",
+        "    first_name,",
+        "    ' ',",
+        "    last_name",
+        "  ) as full_name,",
+        "  DATE_FORMAT(",
+        "    created_at,",
+        "    '%Y-%m-%d'",
+        "  ) as joined_date",
+        "FROM",
+        "  users",
+        "WHERE",
+        "  active = true",
       ].join("\n");
 
       assertEquals(output.trim(), expected);
@@ -421,9 +461,16 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  u.id, u.name, o.order_id, o.amount FROM users u",
-      "INNER JOIN orders o ON u.id = o.user_id",
-      "WHERE o.amount > 1000",
+      "  u.id,",
+      "  u.name,",
+      "  o.order_id,",
+      "  o.amount",
+      "FROM",
+      "  users u",
+      "INNER JOIN",
+      "  orders o ON u.id = o.user_id",
+      "WHERE",
+      "  o.amount > 1000",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
@@ -463,11 +510,17 @@ Deno.test({
 
     const expected = [
       "SELECT",
-      "  * FROM products",
-      "WHERE category IN ('electronics', 'computers')",
-      "  AND price BETWEEN 100 AND 500",
-      "  AND inventory_count > 0",
-      "ORDER BY price ASC",
+      "  *",
+      "FROM",
+      "  products",
+      "WHERE",
+      "  category IN ('electronics', 'computers')",
+      "AND",
+      "  price BETWEEN 100 AND 500",
+      "AND",
+      "  inventory_count > 0",
+      "ORDER BY",
+      "  price ASC",
     ].join("\n");
 
     assertEquals(output.trim(), expected);
