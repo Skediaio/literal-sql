@@ -1,13 +1,11 @@
 /**
  * DML showcase — INSERT / UPDATE / DELETE with RETURNING.
  *
- * NOTE: the parser is SELECT-centric. DML statements are detected and routed
- * through a special branch, but the formatter emits `SELECT *` as a prefix
- * followed by whatever WHERE/RETURNING clauses it recognises. The parameter
- * arrays are still correct — only the SQL string shape is unusual.
- *
- * This documents the library's current DML behaviour. See the DML tests at
- * sql.test.ts:1104-1353 (labelled "(incorrectly parsed)").
+ * DML statements pass through raw: the statement text is preserved exactly
+ * as written (trimmed, line comments stripped) and each ${value} is lifted
+ * to a $N parameter. The SELECT-centric formatter never touches DML, so
+ * ON CONFLICT, DO UPDATE SET, CASE expressions etc. all survive intact.
+ * Fragments appended with .sql are attached verbatim below the statement.
  *
  * Run: deno run --allow-read examples/dml-showcase.ts
  */

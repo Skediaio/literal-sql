@@ -32,9 +32,11 @@ deno lint                                # lint
 
 ### CI
 
-`.github/workflows/publish.yml` runs `npx jsr publish` on every push to `main`.
-Bumping `jsr.json` `version` and merging to main publishes a new release — be
-deliberate about version bumps.
+`.github/workflows/ci.yml` runs `deno fmt --check`, `deno lint`,
+`deno task check`, and `deno task test` on every push to `main` and on PRs.
+`.github/workflows/publish.yml` runs type-check + tests and then
+`npx jsr publish` on every push to `main`. Bumping `deno.json` `version` and
+merging to main publishes a new release — be deliberate about version bumps.
 
 ## Project Layout
 
@@ -42,6 +44,8 @@ deliberate about version bumps.
 mod.ts            Library entry. Exports `SQLQuery` class and `sql` factory.
 bin/cli.ts        CLI. Imports SQLQuery, parses argv, prints formatted SQL.
 tests/sql.test.ts Unit tests for the builder (formatting, params, DML, throws).
+tests/coverage.test.ts Exhaustive matrix: clause/value/nesting/passthrough
+                  variants plus per-channel injection-resistance tests.
 tests/cli.test.ts End-to-end tests that shell out to `bin/cli.ts`.
 examples/         example.ts (tagged-template usage) and basic-query.sql.
 deno.json         Deno + JSR package manifest: name, version, exports, fmt
@@ -56,32 +60,59 @@ deno.json         Deno + JSR package manifest: name, version, exports, fmt
 operation
 (`sql\`...\``chained method) returns a new`SQLQuery`via`structuredClone`of`parts`plus a shallow copy of`params`.
 
-Internal model (`QueryParts`):
+Internal model (`QueryParts` — private, as are `params`, `paramCounter`, and
+`raw`; the public surface is the constructor, `sql`/`.sql`, `toString()`,
+`.query`, `.parameters`, plus `parseInitialQuery`/`parseQuery` used by the
+CLI):
 
 - `select: string[]`, `from: string | null`, `joins: string[]`
-- `where: string[]`, `groupBy: string[]`, `orderBy: string[]`
+- `where: string[]`, `groupBy: string[]`, `having: string[]`,
+  `orderBy: string[]`
 - `limit`, `offset: string | null`, `returning: string[]`
 - `isDML: boolean` — set when the initial query begins with `INSERT` / `UPDATE`
-  / `DELETE`
+  / `DELETE` (always implies raw passthrough)
+- `isRawPassthrough: boolean` + `rawQuery: string | null` — set for DML and
+  when the query contains `WITH` / `UNION` / `INTERSECT` / `EXCEPT`;
+  `toString` then returns the raw query unchanged (bypasses the SELECT-centric
+  formatter to avoid corruption). Fragments appended via `.sql` are attached
+  verbatim to `rawQuery` (never silently dropped).
+
+Each instance also keeps `raw` — the comment-stripped interpolated SQL text.
+Nesting a query inside another inlines `raw` (never the formatted
+`toString()` output) and renumbers its `$N` placeholders in a single pass, so
+shifted placeholders cannot collide with not-yet-shifted ones.
 
 Pipeline:
 
 1. **Interpolation** (`_interpolate`) — turns the tagged template into a SQL
    string, substituting each `${value}` with `$N` and recording the value in
-   `params`. Nested `SQLQuery` fragments are inlined with parameter renumbering.
-   `undefined` becomes the literal `NULL`; `null` becomes a parameter (Postgres
-   semantics).
+   `params`. Nested `SQLQuery` fragments are inlined from their `raw` text
+   with single-pass parameter renumbering. `undefined` becomes the literal
+   `NULL`; `null` becomes a parameter (Postgres semantics).
 2. **Parsing** (`parseInitialQuery` for the constructor, `parseQuery` for
    `.sql(...)` appends) — classifies fragments into `QueryParts` using simple
-   case-insensitive keyword detection (`SELECT`, `FROM`, `JOIN`, `WHERE`, ...).
-3. **Formatting** (`toString`) — emits multi-line SQL with 2-space indentation:
-   - `SELECT` / `FROM` / `JOIN` / `WHERE` / `GROUP BY` / `ORDER BY` each on
-     their own line; their terms indented underneath, one per line.
-   - `AND` / `OR` on their own line within `WHERE` and within `JOIN ... ON`.
+   case-insensitive keyword detection (`SELECT`, `FROM`, `JOIN`, `WHERE`,
+   `HAVING`, ...). Both strip `--` line comments outside string literals.
+   Two masking pre-passes make the keyword scanners robust:
+   - `maskStringLiterals` — replaces `'...'` literals (with `''` doubling)
+     with placeholders so AND/OR/`,`/`--` inside strings isn't mis-scanned.
+   - `maskParenGroups` — length-preserving mask that replaces parenthesized
+     content with spaces so keywords inside `OVER (...)`, `CASE`, and
+     subqueries don't trigger false clause boundaries. Clause content is sliced
+     from the original query via match indices (preserving real parens).
+3. **Formatting** (`toString`) — raw-passthrough queries (DML, WITH/UNION/...)
+   are returned verbatim. Everything else is emitted as multi-line SQL with
+   2-space indentation:
+   - `SELECT` / `FROM` / `JOIN` / `WHERE` / `GROUP BY` / `HAVING` /
+     `ORDER BY` each on their own line; their terms indented underneath, one
+     per line. Term lists split on top-level commas only (function arguments
+     stay intact).
+   - `AND` / `OR` on their own line within `WHERE` / `HAVING` and within
+     `JOIN ... ON` (shared helper: `formatConditionClause`).
    - `LIMIT` / `OFFSET` stay on a single line.
    - Validates invariants and throws:
-     - `SELECT` combined with `RETURNING` → throws.
-     - DML combined with explicit `SELECT` fields → throws.
+     - `SELECT` combined with `RETURNING` → throws (DML never reaches this
+       guard — it passes through raw).
 
 ### CLI
 
@@ -94,8 +125,10 @@ stdout; parameters (if any) are printed as JSON below the query.
 - **Formatting:** 2-space indent, double quotes, semicolons required, line width
   80 — all enforced by `deno fmt` via `jsr.json`.
 - **Exports:** keep the public surface minimal — only `SQLQuery` and `sql`.
-  Internal helpers stay private (`_interpolate`, `splitConditions`,
-  `formatJoinClause`, `parseQuery`).
+  Internal helpers and state stay private (`_interpolate`, `splitConditions`,
+  `formatJoinClause`, `parts`, `params`, `paramCounter`, `raw`).
+  `parseInitialQuery` / `parseQuery` remain public because the CLI drives
+  them directly.
 - **Immutability:** never mutate `this` in chainable methods; always return a
   fresh `SQLQuery`.
 - **Parameters:** PostgreSQL `$1, $2, ...` numbering. The `parameters` getter
@@ -108,27 +141,29 @@ stdout; parameters (if any) are printed as JSON below the query.
 ## Gotchas
 
 - `parseInitialQuery` and `toString` are SELECT-centric. DML statements
-  (`INSERT` / `UPDATE` / `DELETE`) are detected and routed through a special
-  branch, but complex DML (e.g. `ON CONFLICT DO UPDATE`) is only partially
-  parsed — primarily `WHERE` and `RETURNING`. The DML tests in
-  `tests/sql.test.ts` document this limitation explicitly.
-- The parser uses simple regex / keyword-prefix matching. Deeply nested
-  subqueries, CTEs, and window functions are not first-class — fragments the
-  parser does not recognise fall through to the default branch (appended as a
-  `WHERE` condition).
+  (`INSERT` / `UPDATE` / `DELETE`) are therefore raw passthrough: the
+  statement text is preserved verbatim (trimmed, comments stripped, `${}`
+  lifted to `$N`) and never reformatted. Appended `.sql` fragments attach
+  verbatim below the statement. The DML tests in `tests/sql.test.ts` pin this.
+- The parser uses regex / keyword-prefix matching with two masking pre-passes
+  (`maskStringLiterals` and `maskParenGroups`) that make scanners
+  string-literal-aware and parenthesis-depth-aware. As of 0.2.0, string
+  literals containing AND/OR/`,`/`--` are handled correctly, window functions
+  with `OVER (...)` are preserved, and `WITH`/`UNION`/`INTERSECT`/`EXCEPT`
+  queries pass through raw (avoiding silent corruption). Still NOT first-class:
+  dollar-quoting `$$...$$`, `E'...'` escapes, double-quoted identifiers,
+  `LATERAL`, and recursive re-formatting of subqueries.
 - `toString()` runs validation lazily — calling `.parameters` does not throw
   even if the query is invalid. Only `.toString()` / `.query` will throw.
+  Passthrough queries (`WITH`/`UNION`/...) bypass the throw guard by design.
 - The CLI walks `Deno.args` manually (not `parseArgs` output) so that clause
   ordering on the command line is preserved in the output.
-- `tests/cli.test.ts` is **stale**: it expects an old compact format
-  (`SELECT\n  id, name FROM users\nWHERE active = true` — fields+FROM on one
-  line, WHERE+condition on one line) that the current multi-line `toString()`
-  does not produce. These tests fail with `AssertionError` even with
-  `--allow-run` granted, and were failing on HEAD before the refactor. To make
-  them pass, update their expected arrays to match the current output (one term
-  per line, AND/OR on own line). They also need `deno test --allow-run` at the
-  runner level — per-test `permissions: { run: true }` cannot escalate if the
-  runner was invoked without it.
+- `tests/cli.test.ts` end-to-end tests shell out to `bin/cli.ts` via
+  `Deno.Command`, so the test runner needs `--allow-run` at the invocation
+  level (`deno task test` grants it; per-test `permissions: { run: true }`
+  cannot escalate if the runner was invoked without it). The expected arrays
+  were updated in 0.1.0 to match the multi-line `toString()` output — if you
+  re-break the formatter output, re-update those expectations.
 
 ## When to use which agent (oh-my-opencode-slim)
 
@@ -181,6 +216,6 @@ it would only matter for a future docs site.
 1. `deno task check` passes (type-checks every `.ts` file).
 2. `deno task test` passes (sql.test.ts + cli.test.ts).
 3. `deno lint` clean.
-4. `deno fmt --check` clean (CI does not enforce this, but stay consistent).
+4. `deno fmt --check` clean (enforced by `.github/workflows/ci.yml`).
 5. If `mod.ts` public surface changed, bump `deno.json` `version` and document
    the change in the commit message — pushes to `main` publish automatically.

@@ -1,204 +1,256 @@
 # LiteralSQL
 
-A lightweight, raw SQL query builder that prioritizes SQL development through
-template literals, rather than abstracting SQL behind programming language
-constructs like traditional query builders.
+**Write SQL. Add conditionals in JavaScript. Get a query string + parameters —
+pass them to any Postgres client. No DSL, no driver lock-in.**
 
+> **Alpha.** Tested (160+ tests covering every clause variant, value type,
+> nesting shape, passthrough statement, injection channel, and the CLI), but
+> the public API may still change before 1.0.
 
-> ⚠️ **ALPHA SOFTWARE - USE WITH CAUTION** ⚠️
->
-> This library is a **Work in Progress (WIP)** and is **NOT ready for production use**.
-> Expect bugs, breaking changes, and incomplete features. It might not be finished.
-> **Use at your own risk!**
+## What this library believes
 
-## Features
+Three convictions drive every design decision here. If you share them,
+LiteralSQL will feel obvious; if you don't, you'll be happier with Kysely or
+postgres.js.
 
-- Simple, intuitive API using JavaScript template literals
-- SQL-focused development experience
-- PostgreSQL-compatible parameter handling ($1, $2, etc.) to prevent SQL
-  injection (in the JS API, not the CLI)
-- Parameters returned as an array for direct use with node-postgres
-- Immutable query objects for safe, chainable modifications
-- Clean, formatted SQL output
-- Command-line interface for quickly mocking up queries and modifying existing
-  SQL files
-- Zero dependencies
+1. **SQL is the best language for writing SQL.** You should never translate a
+   query in your head between a builder DSL and the SQL it produces. The query
+   you write is the query that runs.
+2. **JavaScript is the best language for conditionality.** `if`, `for`,
+   ternaries, and variables already express "add this filter when X" better
+   than any fluent API. The library's job is only the plumbing that makes that
+   safe: lifting `${value}` into `$N` parameters and renumbering them as
+   fragments compose.
+3. **Query construction and query execution are different jobs.** LiteralSQL
+   builds the string and the parameter array — it never connects, never pools,
+   never owns your transaction. You keep the Postgres client you already have.
 
-## What It's Not
+Everything else — the multi-line formatting, the CLI — is in service of
+readable, debuggable SQL.
 
-- **Not an ORM**: This library doesn't handle database connections or execute
-  queries for you
-- **Not a query executor**: You need to pass the generated SQL and parameters to
-  your database client yourself
-- **Not an abstraction layer**: It intentionally exposes raw SQL rather than
-  hiding it behind methods
-- **Not a schema manager**: There are no migrations or schema definitions
-  included
+## The problem this solves
+
+Tagged-template libraries like [postgres.js](https://github.com/porsager/postgres)
+make *static* SQL beautiful:
+
+```ts
+const user = await sql`SELECT * FROM users WHERE id = ${id}`;
+```
+
+Hard to beat — for a query you know up front. The trouble starts with
+**conditionals and dynamic fragments.** postgres.js handles these by overloading
+a single `sql()` helper to mean different things depending on what you pass it
+([their own README has a "quick primer" table for the forms](https://github.com/porsager/postgres#quick-primer-on-interpolation)):
+
+| Interpolation | Means |
+| --- | --- |
+| `${ sql\`...\` }` | a SQL fragment |
+| `${ sql("col") }` | an identifier (column / table name) |
+| `${ sql([] \| {}, "col", ...) }` | an insert/update/value-list helper |
+| `${ value }` | a plain parameter |
+
+Four forms, one helper — and the helper form is itself overloaded (an array of
+primitives becomes an `IN` list; an array of objects becomes a multi-row insert;
+an object plus column names becomes a typed insert). To build a conditional
+query you mix these and hope you picked the right wrap:
+
+```ts
+// postgres.js — a conditional query:
+await sql`
+  select ${sql(columns)}                        -- identifier form
+  from users
+  where age in ${sql([68, 75, 23])}             -- value-list form
+  ${filterAge ? sql`and age > ${age}` : sql``}  -- fragment form + empty fragment
+`
+```
+
+Get any `sql(...)` wrap wrong and the query breaks — or worse, silently does the
+wrong thing. The rules are subtle enough that even AI assistants routinely emit
+broken postgres.js queries. That's the friction this library exists to remove.
+
+### One rule instead of four
+
+LiteralSQL has a single interpolation rule: **`${value}` is always a parameter**
+(and a nested `sql` fragment is always a fragment). No overloaded helper, no
+identifier-vs-fragment-vs-helper decision tree. For anything that isn't a
+value, you write the SQL and chain it with `.sql`:
+
+```ts
+import { sql } from "jsr:@skedia/literal-sql";
+
+let query = sql`SELECT id, name, email FROM users WHERE 1=1`;
+
+if (filterByName) query = query.sql`AND name = ${name}`;
+if (filterByAge)  query = query.sql`AND age > ${age}`;
+if (limit)        query = query.sql`LIMIT ${limit}`;
+```
+
+The SQL stays SQL. Each `${value}` is lifted to a `$N` parameter and renumbered
+across the whole chain:
+
+```sql
+-- query.toString():
+SELECT
+  id,
+  name,
+  email
+FROM
+  users
+WHERE
+  1=1
+AND
+  name = $1
+AND
+  age > $2
+LIMIT $3
+```
+
+```ts
+query.parameters // → [name, age, limit]
+```
+
+**Honest trade-off:** postgres.js's helpers genuinely do things literal-sql
+doesn't — dynamic multi-row inserts from objects (`sql(users)`), identifier
+escaping, `IN`-list shorthand. If you need those, postgres.js earns its
+complexity. LiteralSQL is focused on the case where the overloading hurts most:
+**conditional composition of the query you're already writing by hand.**
+
+## Composing fragments
+
+A query can be nested inside another as a fragment. Its parameters are
+renumbered past the outer query's parameters automatically:
+
+```ts
+const activeOrgs = sql`SELECT id FROM orgs WHERE active = ${true}`;
+
+const query = sql`
+  SELECT * FROM users
+  WHERE role = ${role}
+  AND org_id IN (${activeOrgs})
+`;
+
+query.parameters // → [role, true] — numbering handled for you
+```
+
+This also works for reusable condition fragments:
+
+```ts
+const notDeleted = sql`deleted_at IS NULL`;
+let query = sql`SELECT * FROM posts WHERE author_id = ${authorId}`;
+query = query.sql`AND ${notDeleted}`;
+```
+
+## SELECT queries are formatted; everything else passes through raw
+
+For plain `SELECT` queries, `toString()` emits consistently formatted,
+multi-line SQL — one clause per line, terms indented, `AND`/`OR` on their own
+lines — so generated queries are pleasant to read in logs and diffs. `WHERE`,
+`GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, and all `JOIN` variants
+are understood.
+
+Statements the SELECT-centric formatter can't safely restructure are **never
+touched**: the text you wrote is preserved verbatim (trimmed, `--` line
+comments stripped), with `${}` values still lifted to `$N` parameters. That
+applies to:
+
+- **DML** — `INSERT`, `UPDATE`, `DELETE` (including `ON CONFLICT DO UPDATE`,
+  `RETURNING`, CASE expressions, ...)
+- **CTEs and set operations** — `WITH`, `UNION`, `INTERSECT`, `EXCEPT`
+
+```ts
+const del = sql`DELETE FROM sessions WHERE expires_at < ${cutoff} RETURNING id`;
+del.toString();  // "DELETE FROM sessions WHERE expires_at < $1 RETURNING id"
+del.parameters;  // [cutoff]
+```
+
+Fragments appended with `.sql` onto a passthrough statement are attached
+verbatim below it — the parameter plumbing works the same everywhere.
+
+## How interpolated values are treated
+
+| You interpolate | It becomes |
+| --- | --- |
+| a value (`string`, `number`, `Date`, array, object, ...) | a `$N` parameter |
+| `null` | a `$N` parameter with value `null` |
+| a `sql` fragment | inline SQL, parameters renumbered |
+| `undefined` | the SQL literal `NULL` |
+
+> ⚠️ **The `undefined` case is a footgun to know about:** `x = NULL` is never
+> true in SQL (you need `x IS NULL`). The substitution exists so optional
+> values can vanish from the parameter list, but if you meant to filter on
+> null, write `IS NULL` explicitly — or pass `null`, which stays a parameter.
+
+Because `${value}` can never become SQL text, injection through values is
+architecturally impossible — the test suite locks this in with dedicated
+injection-resistance tests.
+
+## Executor-agnostic — bring your own Postgres client
+
+LiteralSQL doesn't connect to a database, execute queries, or know anything
+about your driver. It parses your SQL fragments, extracts parameters, and hands
+you back a query string + params array. That's the whole job.
+
+Pass them to whatever Postgres client you already use:
+
+```ts
+// node-postgres (pg) — the established default:
+const { rows } = await pool.query(query.toString(), query.parameters);
+
+// postgres.js (porsager's):
+const rows = await sql.unsafe(query.toString(), query.parameters);
+```
+
+**No driver lock-in.** Other tagged-template libraries (postgres.js, slonik)
+bind query construction to their executor — adopting them means adopting their
+connection pool, their result shape, and their transaction model. LiteralSQL
+keeps construction and execution separate, so:
+
+- **Use the executor you already have.** Already on node-postgres? You don't
+  need to rip out your database layer just to get template-literal queries.
+- **Swap executors without rewriting queries.** Moving between `pg` and
+  postgres.js is a one-line change at the call site — your query construction
+  code stays put.
+- **Mock the database in tests.** LiteralSQL runs with zero database. Call
+  `query.toString()` and `query.parameters` to assert generated SQL in unit
+  tests, no connection required.
+
+> Postgres-placeholder specific: LiteralSQL emits `$1, $2, ...` parameters, so
+> it works with any Postgres-compatible client. SQLite/MySQL clients use
+> different placeholder syntax and won't work without translation.
+
+## Immutability
+
+Every `.sql` call returns a *new* query — the original is untouched. Safe to
+share, cache, and branch without surprising mutations:
+
+```ts
+const base = sql`SELECT * FROM users`;
+const filtered = base.sql`WHERE active = ${true}`;
+
+base.toString();     // "SELECT * FROM users"          — unchanged
+filtered.toString(); // "SELECT * FROM users WHERE active = $1"
+```
+
+## What it's not
+
+- **Not an executor.** It builds the SQL string + parameters array; you pass
+  them to your own database client. No connection pool, no driver lock-in.
+- **Not an ORM.** No models, no relations, no migrations. It's a query builder.
+- **Not a DSL.** You write SQL fragments. The entire API surface is a tagged
+  template plus `.sql` for chaining.
 
 ## Installation
 
-### SQLRaw - Write SQL like SQL should be written
+### Deno
 
-Import directly in your code for each runtime:
-
-## Deno
-
-```js
+```ts
 import { sql } from "jsr:@skedia/literal-sql";
 ```
 
-## Node.js
+### Node.js / Bun
 
 ```sh
 npx jsr add @skedia/literal-sql
-```
-
-## Bun
-
-```sh
-bunx jsr add @skedia/literal-sql
-```
-
-## Usage
-
-```ts
-import { sql } from "@skedia/literal-sql";
-
-// Build a basic query
-
-console.log(query.toString());
-// SELECT
-//   id,
-//   name,
-//   email
-// FROM users
-// WHERE id = $1
-
-console.log(query.parameters);
-// [123]
-
-// Use with a PostgreSQL client (example with node-postgres)
-const result = await client.query(
-  query.toString(),
-  query.parameters,
-);
-
-console.log(query.parameters);
-// [ 123 ]
-
-// Use with a PostgreSQL client (example with postgres.js)
-const result = await client.queryObject({
-  text: query.toString(),
-  args: query.parameters,
-});
-```
-
-## Motivation
-
-### The Problem with Traditional Query Builders
-
-Most query builders like Knex and Kysely focus on abstracting SQL into
-JavaScript/TypeScript method chains:
-
-```ts
-// Knex example
-knex("users")
-  .select("id", "name", "email")
-  .where("active", true)
-  .andWhere("created_at", ">", "2023-01-01")
-  .orderBy("last_login", "desc")
-  .limit(10);
-
-// Kysely example
-db.selectFrom("users")
-  .select(["id", "name", "email"])
-  .where("active", "=", true)
-  .where("created_at", ">", "2023-01-01")
-  .orderBy("last_login", "desc")
-  .limit(10);
-```
-
-While these provide type safety, they come with drawbacks:
-
-- You have to learn the query builder's API instead of using your SQL knowledge
-- Complex queries often require awkward workarounds
-- You frequently end up writing raw SQL for advanced features anyway
-- Debugging means translating from builder syntax back to SQL
-
-### The Problem with Raw SQL Strings
-
-On the other hand, raw SQL strings have their own issues:
-
-```ts
-// Raw SQL approach
-const query = `
-  SELECT id, name, email 
-  FROM users 
-  WHERE active = true
-  ${filterByDate ? "AND created_at > '2023-01-01'" : ""}
-  ${sortField ? `ORDER BY ${sortField} ${sortDirection}` : ""}
-  ${limit ? `LIMIT ${limit}` : ""}
-`;
-```
-
-This leads to:
-
-- String concatenation that's error-prone and unsafe
-- Manual parameter handling to prevent SQL injection
-- Messy conditionals that break SQL formatting
-- No type safety for parameters
-
-### Our Solution
-
-This library gives you the best of both worlds:
-
-- Write real SQL directly using template literals
-- Get automatic parameter handling for safety
-- Build queries incrementally with clean conditionals
-- Keep your SQL formatted and readable
-- No need to learn a new API if you already know SQL
-- Store your SQL in sql files and just read them and add some conditional
-  statements
-
-It's ideal for developers who:
-
-- Prefer working directly with SQL syntax
-- Need to build complex queries programmatically
-- Want clean, readable code without string concatenation
-- Are tired of fighting with query builder limitations
-
-### Building queries incrementally
-
-Queries can be built incrementally by chaining `.sql` method calls:
-
-```ts
-let query = sql`SELECT * FROM users`;
-
-// Conditionally add clauses
-if (name) {
-  query = query.sql`WHERE name = ${name}`;
-}
-
-if (orderByCreated) {
-  query = query.sql`ORDER BY created_at DESC`;
-}
-
-if (limit) {
-  query = query.sql`LIMIT ${limit}`;
-}
-
-console.log(query.toString());
-console.log(query.parameters);
-```
-
-All operations return a new query object, preserving the original:
-
-```ts
-const baseQuery = sql`SELECT * FROM users`;
-const filteredQuery = baseQuery.sql`WHERE active = ${true}`;
-
-console.log(baseQuery.toString()); // Still just "SELECT * FROM users"
-console.log(filteredQuery.toString()); // "SELECT * FROM users WHERE active = $1"
 ```
 
 ## Command Line Interface

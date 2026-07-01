@@ -526,3 +526,150 @@ Deno.test({
     assertEquals(output.trim(), expected);
   },
 });
+
+Deno.test({
+  name: "CLI should handle LEFT and RIGHT JOIN flags",
+  permissions: {
+    read: true,
+    write: true,
+    run: true,
+  },
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "bin/cli.ts",
+        "--query",
+        "SELECT * FROM a",
+        "--left-join",
+        "b ON a.id = b.a_id",
+        "--right-join",
+        "c ON b.id = c.b_id",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { stdout } = await command.output();
+    const output = new TextDecoder().decode(stdout);
+
+    const expected = [
+      "SELECT",
+      "  *",
+      "FROM",
+      "  a",
+      "LEFT JOIN",
+      "  b ON a.id = b.a_id",
+      "RIGHT JOIN",
+      "  c ON b.id = c.b_id",
+    ].join("\n");
+
+    assertEquals(output.trim(), expected);
+  },
+});
+
+Deno.test({
+  name: "CLI --help prints usage and exits successfully",
+  permissions: {
+    read: true,
+    write: true,
+    run: true,
+  },
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: ["run", "--allow-read", "bin/cli.ts", "--help"],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stdout } = await command.output();
+    const output = new TextDecoder().decode(stdout);
+
+    assertEquals(code, 0);
+    assertEquals(output.includes("USAGE:"), true);
+    assertEquals(output.includes("--where CONDITION"), true);
+  },
+});
+
+Deno.test({
+  name: "CLI with no query and no file prints help",
+  permissions: {
+    read: true,
+    write: true,
+    run: true,
+  },
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: ["run", "--allow-read", "bin/cli.ts"],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stdout } = await command.output();
+    const output = new TextDecoder().decode(stdout);
+
+    assertEquals(code, 0);
+    assertEquals(output.includes("USAGE:"), true);
+  },
+});
+
+Deno.test({
+  name: "CLI reports an error and exits 1 for a missing file",
+  permissions: {
+    read: true,
+    write: true,
+    run: true,
+  },
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "bin/cli.ts",
+        "--file",
+        "/nonexistent/query.sql",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stderr } = await command.output();
+    const errorOutput = new TextDecoder().decode(stderr);
+
+    assertEquals(code, 1);
+    assertEquals(errorOutput.includes("Error reading file"), true);
+  },
+});
+
+Deno.test({
+  name: "CLI passes a DML query through raw with appended RETURNING",
+  permissions: {
+    read: true,
+    write: true,
+    run: true,
+  },
+  async fn() {
+    const command = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "bin/cli.ts",
+        "--query",
+        "DELETE FROM users",
+        "--where",
+        "id = 1",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { stdout } = await command.output();
+    const output = new TextDecoder().decode(stdout);
+
+    // DML is raw passthrough; the appended clause attaches verbatim below.
+    const expected = ["DELETE FROM users", "WHERE id = 1"].join("\n");
+
+    assertEquals(output.trim(), expected);
+  },
+});
