@@ -506,7 +506,7 @@ test("Same fragment object used twice duplicates its parameters", () => {
   assertEquals(query.parameters, [10, 10]);
 });
 
-test("Nesting a chained query inlines its formatted text", () => {
+test("Nesting a chained query inlines it with its appended lines", () => {
   let sub = sql`SELECT id FROM orders WHERE total > ${100}`;
   sub = sub.sql`AND status = ${"paid"}`;
   const query = sql`SELECT * FROM users WHERE id IN (${sub})`;
@@ -518,14 +518,8 @@ test("Nesting a chained query inlines its formatted text", () => {
       "FROM",
       "  users",
       "WHERE",
-      "  id IN (SELECT",
-      "  id",
-      "FROM",
-      "  orders",
-      "WHERE",
-      "  total > $1",
-      "AND",
-      "  status = $2)",
+      "  id IN (SELECT id FROM orders WHERE total > $1",
+      "AND status = $2)",
     ].join("\n"),
   );
   assertEquals(query.parameters, [100, "paid"]);
@@ -549,13 +543,20 @@ test("CTE nested as a subquery is inlined into a formatted outer query", () => {
   assertEquals(query.parameters, [1]);
 });
 
-test("Nesting a UNION fragment makes the outer query raw passthrough", () => {
-  // The outer query now contains a top-level-visible UNION keyword, so it is
-  // preserved verbatim rather than risk misformatting.
+test("A UNION inside a nested subquery does not stop the outer formatting", () => {
+  // The UNION sits inside parentheses, so the outer statement is still a
+  // plain SELECT.
   const query = sql`SELECT * FROM t WHERE id IN (${sql`SELECT id FROM a UNION SELECT id FROM b`})`;
   assertEquals(
     query.toString(),
-    "SELECT * FROM t WHERE id IN (SELECT id FROM a UNION SELECT id FROM b)",
+    [
+      "SELECT",
+      "  *",
+      "FROM",
+      "  t",
+      "WHERE",
+      "  id IN (SELECT id FROM a UNION SELECT id FROM b)",
+    ].join("\n"),
   );
 });
 

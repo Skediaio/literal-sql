@@ -3,7 +3,7 @@
 **Write SQL. Add conditionals in JavaScript. Get a query string + parameters —
 pass them to any Postgres client. No DSL, no driver lock-in.**
 
-> **Alpha.** Tested (160+ tests covering every clause variant, value type,
+> **Alpha.** Tested (330+ tests covering every clause variant, value type,
 > nesting shape, passthrough statement, injection channel, and the CLI), but
 > the public API may still change before 1.0.
 
@@ -140,22 +140,20 @@ let query = sql`SELECT * FROM posts WHERE author_id = ${authorId}`;
 query = query.sql`AND ${notDeleted}`;
 ```
 
-## SELECT queries are formatted; everything else passes through raw
+## SELECT queries are formatted; everything else is left as written
 
 For plain `SELECT` queries, `toString()` emits consistently formatted,
 multi-line SQL — one clause per line, terms indented, `AND`/`OR` on their own
-lines — so generated queries are pleasant to read in logs and diffs. `WHERE`,
-`GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, and all `JOIN` variants
-are understood.
+lines — so generated queries are pleasant to read in logs and diffs.
 
-Statements the SELECT-centric formatter can't safely restructure are **never
-touched**: the text you wrote is preserved verbatim (trimmed, `--` line
-comments stripped), with `${}` values still lifted to `$N` parameters. That
-applies to:
+Formatting only ever changes whitespace and keyword case. The result is
+checked against what you wrote; if it would differ in any other way, you get
+your text back unformatted. Quoted text is opaque in every PostgreSQL form:
+`'...'`, `E'...'`, `"..."`, `$$...$$`, `$tag$...$tag$`.
 
-- **DML** — `INSERT`, `UPDATE`, `DELETE` (including `ON CONFLICT DO UPDATE`,
-  `RETURNING`, CASE expressions, ...)
-- **CTEs and set operations** — `WITH`, `UNION`, `INTERSECT`, `EXCEPT`
+Every other statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `WITH`,
+`UNION`, `EXPLAIN`, DDL, ... — is returned exactly as written (trimmed,
+comments stripped), with `${}` values lifted to `$N` parameters.
 
 ```ts
 const del = sql`DELETE FROM sessions WHERE expires_at < ${cutoff} RETURNING id`;
@@ -163,8 +161,35 @@ del.toString();  // "DELETE FROM sessions WHERE expires_at < $1 RETURNING id"
 del.parameters;  // [cutoff]
 ```
 
-Fragments appended with `.sql` onto a passthrough statement are attached
-verbatim below it — the parameter plumbing works the same everywhere.
+## Appended clauses go where the statement expects them
+
+`.sql` works on any statement, not only on `SELECT`. A clause is placed by
+its position in SQL's clause order, whatever the order you append in:
+
+```ts
+let q = sql`UPDATE users SET active = ${false} RETURNING id`;
+q = q.sql`WHERE last_login < ${cutoff}`;
+// UPDATE users SET active = $1
+// WHERE last_login < $2
+// RETURNING id
+
+let report = sql`WITH recent AS (SELECT * FROM orders WHERE day > ${since})
+SELECT * FROM recent ORDER BY total DESC`;
+report = report.sql`WHERE total > ${min}`.sql`LIMIT ${10}`;
+// ... SELECT * FROM recent WHERE total > $2 ORDER BY total DESC LIMIT $3
+```
+
+- A second `WHERE` / `HAVING` is ANDed onto the first, with parentheses
+  around any side that contains an `OR`.
+- `ORDER BY`, `GROUP BY`, `SELECT` and `RETURNING` extend their list;
+  `LIMIT`, `OFFSET` and `FROM` replace the previous value.
+- `AND ...` / `OR ...` continue the condition written last — a `JOIN ... ON`,
+  the `WHERE`, or the `HAVING`.
+- A fragment that is not a clause (`SET ...`, `ON CONFLICT ...`,
+  `UNION ALL SELECT ...`) is attached at the end, as written.
+- If a clause could go in more than one place (for example a `WHERE` on an
+  `INSERT ... ON CONFLICT ... WHERE ... DO UPDATE ... WHERE ...`), `.sql`
+  throws instead of guessing.
 
 ## How interpolated values are treated
 
