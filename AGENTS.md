@@ -38,7 +38,7 @@ npx biome check --write .   # format + lint + organize imports (ts/json only)
 ### CI
 
 `.github/workflows/ci.yml` runs `biome ci`, type-check, tests and build on
-Node 22 and 24 for every push to `main` and on PRs, and checks that
+Node 22 (minimum) and 26 (current LTS) for every push to `main` and on PRs, and checks that
 `package.json` and `jsr.json` versions match. `.github/workflows/publish.yml`
 runs type-check + tests on every push to `main`, then `npm publish
 --provenance` (skipped when that version is already on npm) and
