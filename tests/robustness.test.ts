@@ -2,10 +2,9 @@
  * Robustness tests: properties, fuzzing, injection resistance, immutability,
  * and a "Known bugs" suite.
  *
- * Tests in the "Known bugs" describe block FAIL on purpose against the current
- * implementation. Each one pins a real defect (wrong, broken or silently
- * changed SQL). They are left failing so the fix can be proven by turning
- * them green.
+ * Each test in the "Known bugs" describe block pins a real defect (wrong,
+ * broken or silently changed SQL) that has since been fixed; the test names
+ * describe the old behaviour. Add a failing test there for every new defect.
  *
  * Most assertions use `norm()`: the formatter only inserts or changes
  * whitespace and keyword case, so a correct output must be equal to its input
@@ -426,7 +425,113 @@ describe("Guards for parser fixes", () => {
   });
 });
 
-// --- Known bugs (these FAIL until fixed) ---
+// --- Found while simplifying the parser (0.3.0) ---
+
+describe("Guards for the clause splitter", () => {
+  describe("statements that are not SELECTs are returned verbatim", () => {
+    for (const text of [
+      "TRUNCATE users",
+      "EXPLAIN ANALYZE SELECT * FROM t WHERE a = 1",
+      "CREATE TABLE x AS SELECT * FROM t",
+      "CALL refresh_stats()",
+      "SET search_path TO app",
+      "x IN (SELECT id FROM t)",
+    ]) {
+      test(text, () => assertEquals(q(text).toString(), text));
+    }
+  });
+
+  test("apostrophe in a line comment does not swallow the rest", () => {
+    const query = q("SELECT a -- it's here\nFROM t WHERE b = 'x'");
+    assertEquals(norm(query.toString()), norm("SELECT a FROM t WHERE b = 'x'"));
+  });
+
+  test("trailing spaces inside a multi-line string literal are kept", () => {
+    const text = "SELECT * FROM t WHERE a = 'one  \ntwo'";
+    ok(q(text).toString().includes("'one  \ntwo'"));
+  });
+
+  test("JOIN + WHERE in one fragment: a later JOIN lands before WHERE", () => {
+    const query = sql`SELECT * FROM a`.sql`JOIN b ON b.id = a.id WHERE a.x = 1`
+      .sql`JOIN c ON c.id = a.id`;
+    assertEquals(
+      norm(query.toString()),
+      norm(
+        "SELECT * FROM a JOIN b ON b.id = a.id JOIN c ON c.id = a.id WHERE a.x = 1",
+      ),
+    );
+  });
+
+  test("LIMIT + OFFSET in one fragment: a later OFFSET replaces it", () => {
+    const query = sql`SELECT * FROM a`.sql`LIMIT 1 OFFSET 2`.sql`OFFSET 5`;
+    assertEquals(
+      norm(query.toString()),
+      norm("SELECT * FROM a LIMIT 1 OFFSET 5"),
+    );
+  });
+
+  test("clause fragments are not duplicated into SELECT", () => {
+    assertEquals(
+      norm(sql`JOIN b ON b.id = a.id`.toString()),
+      "JOIN B ON B.ID = A.ID",
+    );
+    assertEquals(
+      norm(sql`HAVING count(*) > ${1}`.toString()),
+      "HAVING COUNT(*) > $1",
+    );
+  });
+
+  test("nesting a query with out-of-order appends keeps clause order", () => {
+    const inner = sql`SELECT id FROM t ORDER BY id`.sql`WHERE x = ${1}`;
+    const query = sql`SELECT * FROM u WHERE id IN (${inner}) AND y = ${2}`;
+    assertEquals(
+      norm(query.toString()),
+      norm(
+        "SELECT * FROM u WHERE id IN (SELECT id FROM t WHERE x = $1 ORDER BY id) AND y = $2",
+      ),
+    );
+  });
+
+  test("nesting keeps the parentheses the builder added around OR", () => {
+    const inner = sql`SELECT id FROM t WHERE a = ${1} OR b = ${2}`
+      .sql`WHERE tenant = ${3}`;
+    const query = sql`SELECT * FROM u WHERE id IN (${inner})`;
+    ok(
+      norm(query.toString()).includes("(A = $1 OR B = $2) AND TENANT = $3"),
+      query.toString(),
+    );
+  });
+
+  test("an empty nested fragment adds nothing", () => {
+    const query = sql`SELECT * FROM t`.sql`WHERE ${sql``}`.sql`LIMIT ${1}`;
+    assertEquals(norm(query.toString()), norm("SELECT * FROM t LIMIT $1"));
+  });
+
+  describe("double-quoted identifiers are opaque", () => {
+    for (const text of [
+      'SELECT "a, b", c FROM t',
+      'SELECT "order by" FROM t WHERE "from" = 1',
+      'SELECT * FROM t WHERE "x AND y" = 1 AND "-- no" = 2',
+    ]) {
+      test(text, () => {
+        const out = q(text).toString();
+        assertEquals(norm(out), norm(text));
+        for (const id of text.match(/"[^"]*"/g) ?? []) ok(out.includes(id));
+      });
+    }
+  });
+
+  test("IS DISTINCT FROM is an operator, not the FROM clause", () => {
+    for (const text of [
+      "SELECT a IS DISTINCT FROM b AS changed FROM t",
+      "SELECT * FROM t WHERE a IS NOT DISTINCT FROM b ORDER BY a",
+    ]) {
+      assertEquals(norm(q(text).toString()), norm(text));
+    }
+  });
+});
+
+// --- Known bugs (fixed; the names describe the old behaviour) ---
 
 describe("Known bugs", () => {
   // maskParenGroups blanks paren content, then the `[1].trim()` emptiness

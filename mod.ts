@@ -89,19 +89,8 @@ interface QueryParts {
   offset: string | null;
   /** RETURNING clause content */
   returning: string[];
-  /** True when the initial query is an INSERT, UPDATE, or DELETE statement. */
-  isDML: boolean;
-  /** True when the query is DML or contains WITH/UNION/INTERSECT/EXCEPT and should pass through raw. */
+  /** True when the text is not a plain SELECT / clause fragment; it is then kept verbatim. */
   isRawPassthrough: boolean;
-  /** Original raw query string used when isRawPassthrough is true. */
-  rawQuery: string | null;
-}
-/**
- * Internal interface for storing parameters using numbered keys.
- * @private
- */
-interface Params {
-  [key: number]: unknown;
 }
 /**
  * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
@@ -109,8 +98,31 @@ interface Params {
  */
 const JOIN_ALTERNATION =
   "(?:NATURAL\\s+)?(?:LEFT\\s+(?:OUTER\\s+)?|RIGHT\\s+(?:OUTER\\s+)?|INNER\\s+|FULL\\s+(?:OUTER\\s+)?|CROSS\\s+)?JOIN\\b";
-/** Line (`--`) and block comments; scanned left to right so each wins in order. */
-const COMMENT_PATTERN = /\/\*[\s\S]*?\*\/|--[^\n]*/g;
+const JOIN_START = new RegExp(`^${JOIN_ALTERNATION}`, "i");
+/** A JOIN clause: join type, table, and the optional ON conditions. */
+const JOIN_CLAUSE = new RegExp(
+  `^(${JOIN_ALTERNATION})\\s+([\\s\\S]+?)(?:\\s+ON\\s+([\\s\\S]+))?$`,
+  "i",
+);
+/**
+ * Quoted text: '...' literals and "..." identifiers (doubled quote escapes);
+ * an unterminated quote runs to the end of the text.
+ */
+const QUOTED = `'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?`;
+const QUOTED_PATTERN = new RegExp(QUOTED, "g");
+/** Quoted text, block comments and line comments, whichever starts first. */
+const QUOTED_OR_COMMENT = new RegExp(
+  `${QUOTED}|[ \\t]*(?:/\\*[\\s\\S]*?\\*/|--[^\\n]*)`,
+  "g",
+);
+/**
+ * Keywords that start a clause the formatter understands. The FROM of
+ * `IS [NOT] DISTINCT FROM` is an operator, not a clause.
+ */
+const CLAUSE_KEYWORDS = `SELECT\\b|(?<!\\bDISTINCT\\s+)FROM\\b|${JOIN_ALTERNATION}|WHERE\\b|GROUP\\s+BY\\b|HAVING\\b|ORDER\\s+BY\\b|LIMIT\\b|OFFSET\\b`;
+/** Only text that starts with one of these is parsed and formatted. */
+const FORMATTABLE_START = new RegExp(`^(?:${CLAUSE_KEYWORDS})`, "i");
+const CLAUSE_START = new RegExp(`\\b(?:${CLAUSE_KEYWORDS}|RETURNING\\b)`, "gi");
 /**
  * Represents an SQL query with support for parameterization and incremental building.
  * Provides methods to parse, append, format, and retrieve the query string and parameters.
@@ -118,14 +130,12 @@ const COMMENT_PATTERN = /\/\*[\s\S]*?\*\/|--[^\n]*/g;
 export class SQLQuery {
   /** The different parts of the SQL query, parsed into categories. */
   private parts: QueryParts;
-  /** The parameters for the parameterized query, stored internally by number. */
-  private params: Params;
-  /** Counter for generating parameter numbers ($1, $2, etc.). */
-  private paramCounter: number;
+  /** The parameter values; `$N` refers to `params[N - 1]`. */
+  private params: unknown[];
   /**
-   * The query's raw SQL text (comments stripped, `${}` values already lifted
-   * to `$N` placeholders). Used verbatim — never the formatted `toString()`
-   * output — when this query is nested inside another as a fragment.
+   * The verbatim SQL text (comments stripped, `${}` values already lifted to
+   * `$N` placeholders). It is what a raw-passthrough query renders as, and
+   * what nesting inlines; empty once clauses were appended to a parsed query.
    */
   private raw: string;
   /**
@@ -147,137 +157,109 @@ export class SQLQuery {
       limit: null,
       offset: null,
       returning: [],
-      isDML: false,
       isRawPassthrough: false,
-      rawQuery: null,
     };
-    this.params = {};
-    this.paramCounter = 0;
+    this.params = [];
     this.raw = "";
     if (strings && strings.raw.length > 0) {
-      // Check raw length for template presence
-      const { interpolatedQuery, initialParams, initialCounter } =
-        this._interpolate(strings, values, 0, {});
-      this.params = initialParams;
-      this.paramCounter = initialCounter;
-      this.parseInitialQuery(interpolatedQuery);
+      const { text, params } = this._interpolate(strings, values, []);
+      this.params = params;
+      this.parseInitialQuery(text);
     }
   }
   /**
-   * Interpolates values into the template strings, handles parameterization ($1, $2),
-   * and attempts to integrate nested SQLQuery fragments while renumbering parameters.
-   * Replaces `undefined` values with the SQL literal `NULL`.
+   * Interpolates values into the template strings as `$N` placeholders.
+   * A nested SQLQuery is inlined as its own SQL text with its placeholders
+   * shifted past the parameters collected so far (single pass, so a shifted
+   * placeholder can never collide with a not-yet-shifted one).
+   * `undefined` becomes the SQL literal `NULL`.
    *
    * @param strings - Template strings array.
    * @param values - Values to be interpolated.
-   * @param startCounter - The parameter counter to start from (for nesting).
-   * @param startParams - The parameters object to start from (for nesting).
-   * @returns An object containing the interpolated query string fragment,
-   * the updated parameters object, and the updated parameter counter.
+   * @param startParams - Parameters already collected (not mutated).
+   * @returns The interpolated SQL text and the extended parameter list.
    * @private
    */
   private _interpolate(
     strings: TemplateStringsArray,
     values: unknown[],
-    startCounter: number,
-    startParams: Params,
-  ): {
-    interpolatedQuery: string;
-    initialParams: Params;
-    initialCounter: number;
-  } {
-    let currentCounter = startCounter;
-    const currentParams = { ...startParams };
-    const interpolatedQuery = strings.reduce((result, string, i) => {
-      if (i < values.length) {
-        const value = values[i];
-        // Handle nested SQLQuery instances: inline the fragment's raw SQL
-        // text and shift its $N placeholders past the parameters collected
-        // so far. Renumbering happens in a single pass so a shifted
-        // placeholder can never collide with a not-yet-shifted one.
-        if (value instanceof SQLQuery) {
-          const shift = currentCounter;
-          // Mask string literals so text like 'costs $1' is not renumbered.
-          const { masked, unmask } = this.maskStringLiterals(value.raw);
-          const nestedFragment = unmask(
-            masked.replace(
-              /\$(\d+)\b/g,
-              (_match, n) => `$${Number(n) + shift}`,
-            ),
-          );
-          value.parameters.forEach((paramValue, index) => {
-            currentParams[shift + index + 1] = paramValue;
-          });
-          currentCounter += value.parameters.length;
-          return result + string + nestedFragment;
-        }
-        // Handle undefined -> NULL literal
-        if (value === undefined) {
-          return result + string + "NULL";
-        }
-        // Handle null, primitives, and other objects as parameters
-        // Everything else becomes a numbered parameter
-        currentCounter++;
-        currentParams[currentCounter] = value;
-        return result + string + `$${currentCounter}`;
+    startParams: unknown[],
+  ): { text: string; params: unknown[] } {
+    let params = startParams;
+    const text = strings.reduce((result, string, i) => {
+      if (i >= values.length) return result + string;
+      const value = values[i];
+      if (value instanceof SQLQuery) {
+        const nested = value.raw || value.toString();
+        const shift = params.length;
+        params = params.concat(value.params);
+        // Nothing to renumber; keeps building long lists by nesting cheap.
+        if (shift === 0) return result + string + nested;
+        // Mask quoted text so text like 'costs $1' is not renumbered.
+        const { masked, unmask } = this.maskStringLiterals(nested);
+        return (
+          result +
+          string +
+          unmask(
+            masked.replace(/\$(\d+)\b/g, (_m, n) => `$${Number(n) + shift}`),
+          )
+        );
       }
-      return result + string;
+      if (value === undefined) return `${result}${string}NULL`;
+      // null, primitives and objects all become a numbered parameter.
+      params = [...params, value];
+      return `${result}${string}$${params.length}`;
     }, "");
-    return {
-      interpolatedQuery,
-      initialParams: currentParams,
-      initialCounter: currentCounter,
-    };
+    return { text, params };
   }
   /**
-   * Parses a query fragment (typically added via `.sql()`) and appends it
-   * to the appropriate query part. Fragments appended to raw-passthrough
-   * queries (DML, WITH/UNION/...) are attached verbatim instead of parsed.
+   * Parses a query fragment (typically added via `.sql()`) and appends each
+   * clause in it to the matching query part. Fragments appended to
+   * raw-passthrough queries are attached verbatim instead of parsed.
    *
    * @param query - The query fragment string to parse and append.
    */
   parseQuery(query: string): void {
-    // Strip comments (outside string literals) so a trailing "-- note"
-    // in a fragment can't comment out whatever toString() joins after it.
-    const trimmedQuery = this.stripComments(query);
-    if (!trimmedQuery) return;
-    this.raw = this.raw ? `${this.raw}\n${trimmedQuery}` : trimmedQuery;
-    // Raw-passthrough queries are never re-parsed; appended fragments are
-    // attached to the raw query text so they aren't silently dropped.
+    // Strip comments so a trailing "-- note" in a fragment can't comment
+    // out whatever toString() joins after it.
+    const fragment = this.stripComments(query);
+    if (!fragment) return;
     if (this.parts.isRawPassthrough) {
-      this.parts.rawQuery = this.parts.rawQuery
-        ? `${this.parts.rawQuery}\n${trimmedQuery}`
-        : trimmedQuery;
+      this.raw = this.raw ? `${this.raw}\n${fragment}` : fragment;
       return;
     }
-    // Basic clause detection for appending. Keywords may be followed by any
-    // whitespace (newline, tab), not just a single space.
-    if (new RegExp(`^${JOIN_ALTERNATION}`, "i").test(trimmedQuery)) {
-      this.parts.joins.push(trimmedQuery);
+    // Appended clauses may arrive out of statement order, so the verbatim
+    // text is no longer the query; nesting falls back to toString().
+    this.raw = "";
+    for (const piece of this.splitClauses(fragment)) this.addClause(piece);
+  }
+  /**
+   * Adds one clause ("WHERE a = 1", "LEFT JOIN b ON ...", "AND c") or a bare
+   * condition to the matching query part.
+   * @private
+   */
+  private addClause(piece: string): void {
+    if (JOIN_START.test(piece)) {
+      this.parts.joins.push(piece);
       return;
     }
-    const keyword = trimmedQuery.match(
+    // Keywords may be followed by any whitespace (newline, tab).
+    const keyword = piece.match(
       /^(select|from|where|and|or|group\s+by|having|order\s+by|limit|offset|returning)\b/i,
     );
     const kw = keyword ? keyword[1].toLowerCase().replace(/\s+/g, " ") : null;
-    const content = keyword
-      ? trimmedQuery.substring(keyword[0].length).trim()
-      : trimmedQuery;
+    const content = keyword ? piece.substring(keyword[0].length).trim() : piece;
     if (!content) return;
     switch (kw) {
       case "select":
-        this.parts.select.push(
-          ...this.splitTopLevelCommas(content)
-            .map((f) => f.trim())
-            .filter((f) => f),
-        );
+        this.parts.select.push(...this.splitTopLevelCommas(content));
         break;
       case "from":
         this.parts.from = content;
         break;
       case "and":
       case "or":
-        this.parts.where.push(trimmedQuery);
+        this.parts.where.push(piece);
         break;
       case "group by":
         this.parts.groupBy.push(content);
@@ -320,268 +302,108 @@ export class SQLQuery {
     list.push(`AND ${hasTopLevelOr(condition) ? `(${condition})` : condition}`);
   }
   /**
-   * Strips `--` and `/* *\/` comments outside string literals, the trailing
-   * whitespace they leave, and a trailing statement `;`, then trims.
-   * Works on the string-masked text so literals are never touched.
+   * Strips `--` and `/* *\/` comments (with the whitespace before them) and
+   * a trailing statement `;`, then trims. Quoted text is matched by the same
+   * scan, so comment markers inside it — and quotes inside comments — are
+   * never misread.
    * @private
    */
   private stripComments(query: string): string {
-    const { masked, unmask } = this.maskStringLiterals(query);
-    return unmask(
-      masked
-        .replace(COMMENT_PATTERN, (m) => (m.startsWith("--") ? "" : " "))
-        .replace(/[ \t]+(?=\n|$)/g, "")
-        .replace(/;\s*$/, ""),
-    ).trim();
+    return query
+      .replace(QUOTED_OR_COMMENT, (m) =>
+        /^['"]/.test(m) ? m : m.trimStart().startsWith("/*") ? " " : "",
+      )
+      .replace(/;\s*$/, "")
+      .trim();
   }
   /**
-   * Parses the initial complete SQL query string provided to the constructor or `sql` tag.
-   * It attempts to identify top-level clauses and sets the `isDML` flag.
-   * This parser is relatively simple and relies on `toString()` for detailed formatting.
+   * Parses the initial SQL text given to the constructor or `sql` tag.
+   * Only text that starts with a SELECT-statement clause keyword is parsed
+   * and formatted. Everything else — DML, DDL, WITH, VALUES, EXPLAIN, set
+   * operations, bare fragments like `a = $1` — is kept verbatim, so the
+   * SELECT-centric formatter can never corrupt it.
    *
    * @param query - The initial SQL query string.
    */
   parseInitialQuery(query: string): void {
-    // Strip comments OUTSIDE string literals, so that '--' inside quotes is
-    // preserved while real comments are removed.
-    query = this.stripComments(query);
-    const originalTrimmed = query;
-    const originalTrimmedLower = originalTrimmed.toLowerCase();
-    this.raw = originalTrimmed;
-
-    // Pass-through for DML (INSERT/UPDATE/DELETE) and WITH/CTE/UNION/
-    // INTERSECT/EXCEPT — the SELECT-centric parser would corrupt these
-    // (e.g. rewrite an UPDATE as a SELECT, or misclassify a second SELECT
-    // as WHERE). The statement is kept verbatim (trimmed, comments
-    // stripped); parameters are still lifted to $N by _interpolate.
-    const isDMLQuery = /^\s*(insert|update|delete|merge)\b/i.test(
-      originalTrimmedLower,
-    );
+    const text = this.stripComments(query);
     if (
-      isDMLQuery ||
-      // WITH, VALUES, TABLE, and parenthesised statements are not plain
-      // SELECTs; formatting them would corrupt or drop them.
-      /^\s*(?:(?:with|values|table)\b|\()/i.test(originalTrimmedLower) ||
-      /\bUNION\b|\bINTERSECT\b|\bEXCEPT\b/i.test(
-        this.maskStringLiterals(originalTrimmedLower).masked,
-      )
+      text &&
+      (!FORMATTABLE_START.test(text) ||
+        /\b(?:UNION|INTERSECT|EXCEPT)\b/i.test(
+          text.replace(QUOTED_PATTERN, ""),
+        ))
     ) {
-      this.parts.isDML = isDMLQuery;
       this.parts.isRawPassthrough = true;
-      this.parts.rawQuery = originalTrimmed;
-      return;
     }
-
-    const hasSelectKeyword = /\bselect\b/i.test(originalTrimmedLower);
-
-    // Clause extraction logic (simplified regex matching)
-    // Note: This simple regex approach might misinterpret nested queries or complex syntax.
-    //
-    // JOIN_ALTERNATION is used in the select/from/joins lookaheads so the lazy
-    // capture stops at the START of the full JOIN construct rather than at
-    // the bare JOIN inside it. GROUP/ORDER and BY may be split by any
-    // whitespace.
-    const clauses: { [key: string]: RegExp } = {
-      select: new RegExp(
-        `\\bSELECT\\b([\\s\\S]*?)(?=\\bFROM\\b|${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
-        "i",
-      ),
-      from: new RegExp(
-        `\\bFROM\\b([\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
-        "i",
-      ),
-      joins: new RegExp(
-        `(\\b${JOIN_ALTERNATION}[\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
-        "gi",
-      ),
-      where:
-        /\bWHERE\b([\s\S]*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
-      groupBy:
-        /\bGROUP\s+BY\b([\s\S]*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
-      having:
-        /\bHAVING\b([\s\S]*?)(?=\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
-      orderBy:
-        /\bORDER\s+BY\b([\s\S]*?)(?=\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
-      limit: /\bLIMIT\b([\s\S]*?)(?=\bOFFSET\b|\bRETURNING\b|$)/i,
-      offset: /\bOFFSET\b([\s\S]*?)(?=\bLIMIT\b|\bRETURNING\b|$)/i,
-      returning: /\bRETURNING\b([\s\S]*?)$/i,
-    };
-
-    // --- Boundary mask: hide paren content so clause keywords inside parens
-    // (e.g. ORDER BY inside `OVER (...)`, CASE expressions, subqueries) don't
-    // trigger false clause boundaries. maskParenGroups is length-preserving;
-    // we slice content from the original `query` using match indices, so
-    // captured content retains real parens for downstream scanners.
-    const boundaryMask = this.maskParenGroups(query);
-    const sliceContent = (m: RegExpMatchArray): string => {
-      const start = m.index! + (m[0].length - m[1].length);
-      const end = m.index! + m[0].length;
-      return query.substring(start, end);
-    };
-
-    // --- Extract SELECT ---
-    const selectMatch = boundaryMask.match(clauses.select);
-    if (selectMatch && sliceContent(selectMatch).trim()) {
-      const fields = this.splitTopLevelCommas(sliceContent(selectMatch))
-        .map((f) => f.trim())
-        .filter((f) => f);
-      if (fields.length > 0) {
-        this.parts.select.push(...fields);
-      }
-    } else if (
-      !this.parts.isDML &&
-      !hasSelectKeyword &&
-      originalTrimmed &&
-      !originalTrimmedLower.match(
-        /^\s*(from|where|group|order|limit|offset|returning)\b/,
-      )
-    ) {
-      // Handle cases like sql`${val1} ${val2}` -> becomes SELECT field(s)
-      this.parts.select.push(originalTrimmed);
-    }
-    // --- Extract other clauses ---
-    const fromMatch = boundaryMask.match(clauses.from);
-    if (fromMatch && sliceContent(fromMatch).trim()) {
-      this.parts.from = sliceContent(fromMatch).trim();
-    }
-    let joinMatch: RegExpExecArray | null;
-    const joinRegex = clauses.joins;
-    joinRegex.lastIndex = 0;
-    while ((joinMatch = joinRegex.exec(boundaryMask)) !== null) {
-      if (joinMatch?.[0]?.trim()) {
-        // Slice from original query (mask is length-preserving).
-        const joinContent = query
-          .substring(joinMatch.index!, joinMatch.index! + joinMatch[0].length)
-          .trim();
-        if (joinContent) this.parts.joins.push(joinContent);
-      }
-      if (joinMatch && joinRegex.lastIndex === joinMatch.index) {
-        joinRegex.lastIndex++;
-      }
-    }
-    const whereMatch = boundaryMask.match(clauses.where);
-    if (whereMatch && sliceContent(whereMatch).trim()) {
-      this.parts.where.push(sliceContent(whereMatch).trim());
-    }
-    const groupByMatch = boundaryMask.match(clauses.groupBy);
-    if (groupByMatch && sliceContent(groupByMatch).trim()) {
-      this.parts.groupBy.push(sliceContent(groupByMatch).trim());
-    }
-    const havingMatch = boundaryMask.match(clauses.having);
-    if (havingMatch && sliceContent(havingMatch).trim()) {
-      this.parts.having.push(sliceContent(havingMatch).trim());
-    }
-    const orderByMatch = boundaryMask.match(clauses.orderBy);
-    if (orderByMatch && sliceContent(orderByMatch).trim()) {
-      this.parts.orderBy.push(sliceContent(orderByMatch).trim());
-    }
-    const limitMatch = boundaryMask.match(clauses.limit);
-    if (limitMatch && sliceContent(limitMatch).trim()) {
-      this.parts.limit = sliceContent(limitMatch).trim();
-    }
-    const offsetMatch = boundaryMask.match(clauses.offset);
-    if (offsetMatch && sliceContent(offsetMatch).trim()) {
-      this.parts.offset = sliceContent(offsetMatch).trim();
-    }
-
-    // Extract RETURNING clause (used for DML statements)
-    const returningMatch = boundaryMask.match(clauses.returning);
-    if (returningMatch && sliceContent(returningMatch).trim()) {
-      this.parts.returning.push(sliceContent(returningMatch).trim());
-    }
-    // Note: Default SELECT * logic is handled in toString()
+    this.raw = text;
+    if (this.parts.isRawPassthrough) return;
+    for (const piece of this.splitClauses(text)) this.addClause(piece);
   }
   /**
-   * Splits SQL conditions by top-level AND/OR, respecting parentheses.
-   * Char-scanner with paren-depth tracking, BETWEEN-AND masking, and
-   * string-literal masking (so AND/OR inside quotes isn't mis-split).
-   * Returns array like ["cond1", "AND cond2", "OR cond3"]
-   * @param conditionString - The string containing conditions.
-   * @returns An array of condition strings, subsequent parts prefixed with AND/OR.
+   * Cuts `text` in front of every top-level match of `pattern` and returns
+   * the trimmed, non-empty pieces. Matches are located on `mask` (same
+   * length as `text`), so those inside parentheses or quotes don't count.
    * @private
    */
-  private splitConditions(conditionString: string): string[] {
-    if (!conditionString) return [];
-
-    // Mask string literals first so AND/OR inside quotes isn't seen as a
-    // logical operator. Unmask at return.
-    const { masked: litMasked, unmask: litUnmask } =
-      this.maskStringLiterals(conditionString);
-
-    // Mask BETWEEN's AND so it isn't treated as a logical operator.
-    // Placeholder must not contain the literal text "AND" or "OR" — the
-    // top-level scanner would otherwise split inside the placeholder.
-    const BETWEEN_MASK = "\u0000BTWN\u0000";
-    const masked = litMasked.replace(
-      /\bBETWEEN\b\s+[\s\S]+?\s+\bAND\b\s+/gi,
-      (m) => m.replace(/\bAND\b/i, BETWEEN_MASK),
-    );
-
-    // Scan and split on top-level AND/OR, respecting parentheses
-    const tokens: string[] = [];
-    let current = "";
-    let parenDepth = 0;
-    let i = 0;
-    while (i < masked.length) {
-      const ch = masked[i];
-      if (ch === "(") {
-        parenDepth++;
-        current += ch;
-        i++;
-        continue;
-      }
-      if (ch === ")") {
-        parenDepth--;
-        current += ch;
-        i++;
-        continue;
-      }
-      // Only at a word start: "color", "brand" and "FOR" must not split.
-      if (
-        parenDepth === 0 &&
-        (i === 0 || !/[A-Za-z0-9_$]/.test(masked[i - 1]))
-      ) {
-        const m = masked.substring(i).match(/^(AND|OR)(?![A-Za-z0-9_])/i);
-        if (m) {
-          if (current.trim()) {
-            tokens.push(current.trim());
-            tokens.push(m[1].toUpperCase());
-          }
-          current = "";
-          i += m[0].length;
-          continue;
-        }
-      }
-      current += ch;
-      i++;
-    }
-    if (current.trim()) tokens.push(current.trim());
-
-    // Unmask BETWEEN's AND, then unmask string literals.
-    for (let k = 0; k < tokens.length; k++) {
-      tokens[k] = tokens[k].replace(new RegExp(BETWEEN_MASK, "gi"), "AND");
-      tokens[k] = litUnmask(tokens[k]);
-    }
-
-    // Reassemble into ["cond1", "AND cond2", "OR cond3", ...]
-    if (tokens.length === 0) return [];
-    if (tokens.length === 1) return tokens;
-    const result: string[] = [tokens[0]];
-    for (let j = 1; j < tokens.length; j += 2) {
-      const op = tokens[j];
-      const cond = tokens[j + 1] || "";
-      result.push(`${op} ${cond}`.trim());
-    }
-    return result;
+  private splitTopLevel(
+    text: string,
+    pattern: RegExp,
+    mask = this.maskParenGroups(text),
+  ): string[] {
+    const starts = [0];
+    for (const m of mask.matchAll(pattern)) starts.push(m.index);
+    return starts
+      .map((start, i) => text.slice(start, starts[i + 1]).trim())
+      .filter((piece) => piece);
   }
-
   /**
-   * Masks SQL single-quoted string literals (with `''` doubling support) by
-   * replacing each literal with a `\u0001S<n>\u0001` placeholder. Returns the
-   * masked string plus an `unmask(t)` function that restores the originals.
-   * Used by splitConditions / splitTopLevelCommas / the comment stripper so
-   * that AND/OR/commas/-- inside string literals are not misinterpreted.
-   * Out of scope: dollar-quoting `$$...$$`, E'...' C-escapes, "..." identifiers.
+   * Splits SQL text into its top-level clauses ("SELECT a", "FROM t", ...).
+   * Text before the first keyword (a bare condition) is its own piece.
+   * @private
+   */
+  private splitClauses(text: string): string[] {
+    return this.splitTopLevel(text, CLAUSE_START);
+  }
+  /**
+   * Splits conditions at top-level AND/OR: `a AND b OR c` becomes
+   * ["a", "AND b", "OR c"]. The first entry never carries an operator.
+   * @private
+   */
+  private splitConditions(conditions: string): string[] {
+    // The AND of "BETWEEN x AND y" is not a logical operator: blank it.
+    const mask = this.maskParenGroups(conditions).replace(
+      /\bBETWEEN\s[\s\S]+?\sAND\b/gi,
+      (m) => " ".repeat(m.length),
+    );
+    // `$` guards placeholders such as "$and"; \b alone would split there.
+    return this.splitTopLevel(conditions, /(?<![\w$])(?:AND|OR)\b/gi, mask).map(
+      (piece, i) => {
+        const [, operator, condition] = piece.match(
+          /^(?:(AND|OR)\b\s*)?([\s\S]*)$/i,
+        ) as RegExpMatchArray;
+        return i === 0 || !operator
+          ? condition
+          : `${operator.toUpperCase()} ${condition}`.trim();
+      },
+    );
+  }
+  /**
+   * Splits a comma-separated list (SELECT fields, function arguments,
+   * ORDER BY terms) at top-level commas into trimmed, non-empty items.
+   * @private
+   */
+  private splitTopLevelCommas(list: string): string[] {
+    return this.splitTopLevel(list, /,/g)
+      .map((item) => item.replace(/^,/, "").trim())
+      .filter((item) => item);
+  }
+  /**
+   * Masks quoted text ('...' literals and "..." identifiers) by replacing
+   * each with a placeholder. Returns the masked string plus an `unmask(t)`
+   * function that restores the originals. Used so that AND/OR/commas/`$N`
+   * inside quotes are not misinterpreted.
+   * Out of scope: dollar-quoting `$$...$$` and E'...' C-escapes.
    * @private
    */
   private maskStringLiterals(s: string): {
@@ -589,222 +411,80 @@ export class SQLQuery {
     unmask: (t: string) => string;
   } {
     const map: string[] = [];
-    let masked = "";
-    let i = 0;
-    while (i < s.length) {
-      if (s[i] === "'") {
-        let literal = "'";
-        i++;
-        while (i < s.length) {
-          if (s[i] === "'" && s[i + 1] === "'") {
-            literal += "''";
-            i += 2;
-            continue;
-          }
-          if (s[i] === "'") {
-            literal += "'";
-            i++;
-            break;
-          }
-          literal += s[i];
-          i++;
-        }
-        masked += `\uE000S${map.length}\uE000`;
-        map.push(literal);
-      } else {
-        masked += s[i];
-        i++;
-      }
-    }
+    const masked = s.replace(QUOTED_PATTERN, (m) => `S${map.push(m) - 1}`);
     const unmask = (t: string) =>
-      t.replace(/\uE000S(\d+)\uE000/g, (_, n) => map[Number(n)] ?? "");
+      t.replace(/S(\d+)/g, (_, n) => map[Number(n)] ?? "");
     return { masked, unmask };
   }
 
   /**
-   * Returns a length-preserving mask of `s` with all parenthesized group
-   * content and string-literal content (with `''` doubling) replaced by
-   * spaces, so quoted parens and keywords don't affect clause detection.
-   * Used by parseInitialQuery to detect clause boundaries on the mask, then
-   * slice content from the original query — so keywords inside parens
-   * (ORDER BY inside `OVER (...)`, CASE/WHEN, subqueries) don't trigger
-   * false clause boundaries while captured content retains its real parens.
+   * Returns a length-preserving mask of `s` with quoted text and everything
+   * inside parentheses replaced by spaces, so keywords there (ORDER BY inside
+   * `OVER (...)`, subqueries, 'no limit here') are not clause boundaries.
+   * Callers slice the original text by the indices found on the mask.
    * @private
    */
   private maskParenGroups(s: string): string {
-    let masked = "";
     let depth = 0;
-    let inString = false;
-    let i = 0;
-    while (i < s.length) {
-      const ch = s[i];
-      if (ch === "'" && !inString) {
-        inString = true;
-        masked += ch;
-        i++;
-        continue;
-      }
-      if (inString) {
-        // Blank literal content too, so keywords inside strings (e.g.
-        // 'no limit here') can't be seen as clause boundaries.
-        if (ch === "'" && s[i + 1] === "'") {
-          masked += "  ";
-          i += 2;
-          continue;
-        }
-        if (ch === "'") inString = false;
-        masked += ch === "'" ? ch : " ";
-        i++;
-        continue;
-      }
-      if (ch === "(") {
-        depth++;
-        masked += " ";
-      } else if (ch === ")") {
-        // Clamp at 0 so unmatched ')' in malformed SQL doesn't drive depth
-        // negative and leak subsequent paren content unmasked.
-        depth = Math.max(0, depth - 1);
-        masked += " ";
-      } else if (depth > 0) {
-        masked += " ";
-      } else {
-        masked += ch;
-      }
-      i++;
-    }
-    return masked;
-  }
-
-  /**
-   * Splits a string at top-level commas, respecting parentheses AND string
-   * literals. Used for SELECT field lists and function argument lists.
-   * @private
-   */
-  private splitTopLevelCommas(s: string): string[] {
-    const { masked, unmask } = this.maskStringLiterals(s);
-    const parts: string[] = [];
-    let current = "";
-    let parenDepth = 0;
-    for (const ch of masked) {
-      if (ch === "(") {
-        parenDepth++;
-        current += ch;
-      } else if (ch === ")") {
-        parenDepth--;
-        current += ch;
-      } else if (ch === "," && parenDepth === 0) {
-        parts.push(current);
-        current = "";
-      } else {
-        current += ch;
-      }
-    }
-    if (current.trim()) parts.push(current);
-    return parts.map(unmask);
+    return s
+      .replace(QUOTED_PATTERN, (m) => " ".repeat(m.length))
+      .replace(/[()]|[^()]+/g, (m) => {
+        if (m === "(") depth++;
+        // Clamp at 0 so an unmatched ')' doesn't unmask later paren content.
+        else if (m === ")") depth = Math.max(0, depth - 1);
+        else if (depth === 0) return m;
+        return " ".repeat(m.length);
+      });
   }
   /**
-   * Formats a JOIN clause string according to multi-line rules.
-   * @param joinClause - The raw join clause string.
-   * @returns An array of formatted lines.
+   * Formats a JOIN clause: the join type on its own line, then the table
+   * with its first ON condition, then one line per further AND/OR.
    * @private
    */
   private formatJoinClause(joinClause: string): string[] {
-    const formattedLines: string[] = [];
-    const joinRegex =
-      /^((?:NATURAL\s+)?(?:LEFT\s+(?:OUTER\s+)?|RIGHT\s+(?:OUTER\s+)?|INNER\s+|FULL\s+(?:OUTER\s+)?|CROSS\s+)?JOIN)\s+([\s\S]+?)(\s+ON\s+([\s\S]+))?$/i;
-    const match = joinClause.match(joinRegex);
-    if (match) {
-      const [, joinType = "JOIN", tableInfoRaw, , onConditions] = match;
-      const tableInfo = tableInfoRaw.trim();
-      formattedLines.push(joinType.trim());
-
-      if (onConditions) {
-        const conditionParts = this.splitConditions(onConditions.trim());
-        if (conditionParts.length > 0) {
-          const firstCondition = conditionParts[0]
-            .trim()
-            .replace(/^(AND|OR)\s+/i, "");
-
-          formattedLines.push(`  ${tableInfo} ON ${firstCondition}`);
-
-          // For subsequent parts, format per test expectations
-          for (let i = 1; i < conditionParts.length; i++) {
-            const part = conditionParts[i].trim();
-            const logicalMatch = part.match(/^(AND|OR)\b/i);
-            if (logicalMatch) {
-              // Format as:  "  AND condition" (operator and condition on same line)
-              formattedLines.push(`  ${part}`);
-            } else {
-              // If no explicit operator, default to AND
-              formattedLines.push(`  AND ${part}`);
-            }
-          }
-        } else {
-          formattedLines.push(`  ${tableInfo}`);
-        }
-      } else {
-        formattedLines.push(`  ${tableInfo}`);
-      }
-    } else {
-      formattedLines.push(joinClause);
-    } // Fallback
-    return formattedLines;
+    const match = joinClause.match(JOIN_CLAUSE);
+    if (!match) return [joinClause];
+    const [, joinType, table, on] = match;
+    if (!on) return [joinType, `  ${table.trim()}`];
+    const [first, ...rest] = this.splitConditions(on);
+    return [
+      joinType,
+      `  ${table.trim()} ON ${first}`,
+      ...rest.map((condition) => `  ${condition}`),
+    ];
   }
 
   /**
-   * Recursively formats a SELECT field, expanding nested function calls
-   * onto multiple indented lines. Single-arg "*" functions (e.g., count(*))
+   * Recursively formats a SELECT field, expanding function calls onto
+   * multiple indented lines. Single-arg "*" functions (e.g., count(*))
    * and empty-arg functions (e.g., now()) stay on a single line.
    * @private
    */
   private formatSelectField(field: string, indent: number): string[] {
-    const lines: string[] = [];
     const prefix = " ".repeat(indent);
+    // Set a window function's top-level "OVER ..." aside first; the greedy
+    // call regex below would otherwise swallow its parentheses as arguments.
+    const over = this.maskParenGroups(field).search(/\bOVER\b/i);
+    const core = over < 0 ? field : field.slice(0, over).trimEnd();
+    const overSuffix = over < 0 ? "" : ` ${field.slice(over).trim()}`;
 
-    // Window function: detect trailing "OVER" at paren-depth 0 BEFORE running
-    // the greedy ([\s\S]*) func-call regex (which would otherwise eat OVER's
-    // parens into argsStr, corrupting e.g. ROW_NUMBER() OVER (PARTITION BY ...).
-    let core = field;
-    let overSuffix = "";
-    const lower = field.toLowerCase();
-    let depth = 0;
-    for (let i = 0; i < lower.length; i++) {
-      const c = lower[i];
-      if (c === "(") depth++;
-      else if (c === ")") depth--;
-      else if (
-        depth === 0 &&
-        lower.startsWith("over", i) &&
-        (i === 0 || !/[a-z0-9_]/i.test(lower[i - 1])) &&
-        (i + 4 === lower.length || !/[a-z0-9_]/i.test(lower[i + 4]))
-      ) {
-        core = field.substring(0, i).trimEnd();
-        overSuffix = " " + field.substring(i).trim();
-        break;
-      }
-    }
-
-    const funcMatch = core.match(/^(\w+)\s*\(([\s\S]*)\)(.*)$/);
-    if (!funcMatch) {
-      lines.push(`${prefix}${field}`);
-      return lines;
-    }
-    const [, funcName, argsStr, aliasSuffix] = funcMatch;
-    const args = this.splitTopLevelCommas(argsStr)
-      .map((a) => a.trim())
-      .filter((a) => a);
+    const call = core.match(/^(\w+)\s*\(([\s\S]*)\)(.*)$/);
+    if (!call) return [prefix + field];
+    const [, name, argList, alias] = call;
+    const args = this.splitTopLevelCommas(argList);
     if (args.length === 0 || (args.length === 1 && args[0] === "*")) {
-      lines.push(`${prefix}${field}`);
-      return lines;
+      return [prefix + field];
     }
-    lines.push(`${prefix}${funcName}(`);
-    args.forEach((arg, i) => {
-      const isLast = i === args.length - 1;
-      const argWithComma = isLast ? arg : `${arg},`;
-      lines.push(...this.formatSelectField(argWithComma, indent + 2));
-    });
-    lines.push(`${prefix})${aliasSuffix}${overSuffix}`);
-    return lines;
+    return [
+      `${prefix}${name}(`,
+      ...args.flatMap((arg, i) =>
+        this.formatSelectField(
+          i < args.length - 1 ? `${arg},` : arg,
+          indent + 2,
+        ),
+      ),
+      `${prefix})${alias}${overSuffix}`,
+    ];
   }
 
   /**
@@ -813,63 +493,39 @@ export class SQLQuery {
    * Returns an empty array when there are no conditions.
    * @private
    */
-  private formatConditionClause(
-    keyword: string,
-    conditionParts: string[],
-  ): string[] {
-    if (conditionParts.length === 0) return [];
-    const lines: string[] = [keyword];
-    // Combine potentially fragmented parts, then re-split on top-level AND/OR
-    const conditions = this.splitConditions(conditionParts.join(" "));
-    if (conditions.length > 0) {
-      const firstCondition = conditions[0].trim().replace(/^(AND|OR)\s+/i, "");
-      lines.push(`  ${firstCondition}`);
-      for (let i = 1; i < conditions.length; i++) {
-        const part = conditions[i].trim();
-        const logicalMatch = part.match(/^(AND|OR)\b/i);
-        if (logicalMatch) {
-          // AND/OR on its own line at col 0; condition indented 2 on the next line
-          lines.push(logicalMatch[0].toUpperCase());
-          lines.push(`  ${part.substring(logicalMatch[0].length).trim()}`);
-        } else {
-          // No explicit operator — default to AND
-          lines.push("AND");
-          lines.push(`  ${part}`);
-        }
-      }
-    }
-    return lines;
+  private formatConditionClause(keyword: string, parts: string[]): string[] {
+    const [first, ...rest] = this.splitConditions(parts.join(" "));
+    if (first === undefined) return [];
+    return [
+      keyword,
+      `  ${first}`,
+      ...rest.flatMap((condition) => {
+        const operator = condition.split(" ", 1)[0];
+        return [operator, `  ${condition.slice(operator.length).trim()}`];
+      }),
+    ];
   }
 
   /**
-   * Formats a comma-separated term list (GROUP BY / ORDER BY / RETURNING):
-   * the keyword on its own line, one term per indented line. Splits only on
-   * top-level commas so function arguments stay intact.
+   * Formats a comma-separated term list (GROUP BY / ORDER BY): the keyword
+   * on its own line, one term per indented line. Splits only on top-level
+   * commas so function arguments stay intact.
    * @private
    */
   private formatTermListClause(keyword: string, parts: string[]): string[] {
-    if (parts.length === 0) return [];
-    const terms = this.splitTopLevelCommas(parts.join(", "))
-      .map((s) => s.trim())
-      .filter((s) => s);
-    if (terms.length === 0) return [];
-    return [keyword, `  ${terms.join(",\n  ")}`];
+    const terms = this.splitTopLevelCommas(parts.join(", "));
+    return terms.length === 0 ? [] : [keyword, `  ${terms.join(",\n  ")}`];
   }
 
   /**
    * Returns the formatted, multi-line SQL query string.
-   * DML and WITH/UNION/INTERSECT/EXCEPT queries are returned verbatim
-   * (raw passthrough); everything else is reformatted clause by clause.
+   * Raw-passthrough queries are returned verbatim; SELECT statements and
+   * clause fragments are reformatted clause by clause.
    * @returns The formatted SQL query string.
    * @throws {Error} If a RETURNING clause is used with a SELECT statement.
    */
   toString(): string {
-    // Passthrough for DML and WITH/CTE/UNION/INTERSECT/EXCEPT — return the
-    // raw query (trimmed, comments stripped) without reformatting, since the
-    // SELECT-centric formatter would corrupt these constructs.
-    if (this.parts.isRawPassthrough && this.parts.rawQuery !== null) {
-      return this.parts.rawQuery;
-    }
+    if (this.parts.isRawPassthrough) return this.raw;
 
     // SELECT statements cannot include a RETURNING clause. (DML statements
     // pass through raw above and never reach this guard.)
@@ -881,23 +537,15 @@ export class SQLQuery {
 
     if (this.parts.select.length > 0) {
       output.push("SELECT");
-      const lastIdx = this.parts.select.length - 1;
-      this.parts.select.forEach((part, i) => {
-        const cleaned = part.replace(/,\s*$/, "");
-        const isLast = i === lastIdx;
-        const fieldWithSuffix = isLast ? cleaned : `${cleaned},`;
-        output.push(...this.formatSelectField(fieldWithSuffix, 2));
+      const last = this.parts.select.length - 1;
+      this.parts.select.forEach((field, i) => {
+        output.push(
+          ...this.formatSelectField(i < last ? `${field},` : field, 2),
+        );
       });
     } else if (this.parts.from) {
       output.push("SELECT");
       output.push("  *"); // Default SELECT *
-    } else if (
-      Object.values(this.parts).every(
-        (p) => !p || (Array.isArray(p) && p.length === 0),
-      )
-    ) {
-      output.push("SELECT");
-      output.push("  *"); // sql`` case
     }
 
     // FROM
@@ -916,14 +564,8 @@ export class SQLQuery {
     output.push(...this.formatTermListClause("GROUP BY", this.parts.groupBy));
     output.push(...this.formatConditionClause("HAVING", this.parts.having));
     output.push(...this.formatTermListClause("ORDER BY", this.parts.orderBy));
-    // LIMIT
-    if (this.parts.limit !== null && this.parts.limit !== undefined) {
-      output.push(`LIMIT ${this.parts.limit}`);
-    }
-    // OFFSET
-    if (this.parts.offset !== null && this.parts.offset !== undefined) {
-      output.push(`OFFSET ${this.parts.offset}`);
-    }
+    if (this.parts.limit !== null) output.push(`LIMIT ${this.parts.limit}`);
+    if (this.parts.offset !== null) output.push(`OFFSET ${this.parts.offset}`);
     return output.join("\n");
   }
   /**
@@ -936,39 +578,13 @@ export class SQLQuery {
     return this.toString();
   }
   /**
-   * Gets the parameters for the parameterized query as a correctly ordered array,
-   * suitable for use with database drivers like node-postgres.
-   * Handles potential gaps in parameter numbering internally.
+   * Gets the parameters for the parameterized query as an array in `$N`
+   * order, suitable for database drivers like node-postgres.
    *
    * @returns The query parameters as an array. Returns empty array if no parameters.
    */
   get parameters(): unknown[] {
-    if (Object.keys(this.params).length === 0) {
-      return [];
-    }
-    const paramIndices = Object.keys(this.params)
-      .map(Number)
-      .sort((a, b) => a - b);
-    if (paramIndices.length === 0) {
-      return [];
-    }
-    const maxParam = paramIndices[paramIndices.length - 1]; // Use highest actual index found
-    const finalParams = new Array(maxParam);
-    for (let i = 1; i <= maxParam; i++) {
-      // Fill array based on actual params, leaving undefined for gaps
-      finalParams[i - 1] = Object.hasOwn(this.params, i)
-        ? this.params[i]
-        : undefined;
-    }
-    // Trim only trailing undefined values
-    let lastDefinedIndex = -1;
-    for (let i = finalParams.length - 1; i >= 0; i--) {
-      if (finalParams[i] !== undefined) {
-        lastDefinedIndex = i;
-        break;
-      }
-    }
-    return finalParams.slice(0, lastDefinedIndex + 1);
+    return [...this.params];
   }
   /**
    * Appends a new SQL fragment to the current query, returning a *new* SQLQuery instance.
@@ -987,27 +603,20 @@ export class SQLQuery {
    * ```
    */
   sql(strings: TemplateStringsArray, ...values: unknown[]): SQLQuery {
-    // Create a new instance for immutability
     const newQuery = new SQLQuery();
-    // Deep clone parts (structuredClone handles Date, RegExp etc.)
-    newQuery.parts = structuredClone(this.parts);
-    // Copy parameters, counter, and raw text
-    newQuery.params = { ...this.params };
-    newQuery.paramCounter = this.paramCounter;
+    // Copy one level deep: the parts hold only strings and string arrays.
+    // (structuredClone was 40% of the time of a typical chained build.)
+    newQuery.parts = Object.fromEntries(
+      Object.entries(this.parts).map(([key, value]) => [
+        key,
+        Array.isArray(value) ? [...value] : value,
+      ]),
+    ) as unknown as QueryParts;
     newQuery.raw = this.raw;
-    // Interpolate the new fragment, starting parameter numbering after existing ones
-    const { interpolatedQuery, initialParams, initialCounter } =
-      newQuery._interpolate(
-        strings,
-        values,
-        newQuery.paramCounter,
-        newQuery.params,
-      );
-    // Update the new query's parameters and counter from interpolation result
-    newQuery.params = initialParams;
-    newQuery.paramCounter = initialCounter;
-    // Parse the *new* interpolated fragment and add/append its parts
-    newQuery.parseQuery(interpolatedQuery);
+    // Number the fragment's parameters after the existing ones.
+    const { text, params } = this._interpolate(strings, values, this.params);
+    newQuery.params = params;
+    newQuery.parseQuery(text);
     return newQuery;
   }
 }
