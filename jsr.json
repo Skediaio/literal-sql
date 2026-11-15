@@ -1,0 +1,11 @@
+{
+  "name": "@skedia/literal-sql",
+  "version": "0.2.1",
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./bin/cli.ts"
+  },
+  "publish": {
+    "include": ["mod.ts", "bin/cli.ts", "README.md", "LICENSE"]
+  }
+}

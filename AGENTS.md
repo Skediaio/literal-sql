@@ -1,7 +1,7 @@
 # LiteralSQL — Agent Guide
 
-A lightweight, zero-dependency raw SQL query builder for Deno / Node / Bun.
-Published to JSR as **`@skedia/literal-sql`**. SQL is written with
+A lightweight, zero-dependency raw SQL query builder for Node / Bun (and Deno
+via JSR). Published to npm and JSR as **`@skedia/literal-sql`**. SQL is written with
 tagged-template literals; the builder produces PostgreSQL-style `$1, $2, ...`
 placeholders plus a parameters array, and emits consistently formatted
 multi-line SQL.
@@ -11,32 +11,39 @@ multi-line SQL.
 
 ## Runtime & Toolchain
 
-- **Runtime:** Deno 2.2.x (also consumable from Node and Bun via `jsr:`)
-- **Language:** TypeScript 5.7, strict
-- **Package registry:** JSR (`deno.json` — also the Deno task/fmt config)
-- **No external runtime dependencies** — only `jsr:@std/cli` for the CLI and
-  `jsr:@std/assert` for tests
+- **Runtime:** Node.js >= 22.18 (native TypeScript type stripping — `.ts`
+  files run directly, no tsx/ts-node). Moved off Deno in 0.2.1.
+- **Language:** TypeScript, strict, erasable syntax only (`erasableSyntaxOnly`:
+  no `enum`, `namespace`, or constructor parameter properties — Node can't
+  strip those)
+- **Package registries:** npm (`package.json`, ships compiled `dist/`) and JSR
+  (`jsr.json`, ships the `.ts` sources). Keep both `version` fields equal — CI
+  checks it.
+- **No runtime dependencies.** Dev only: `typescript`, `@types/node`,
+  `@biomejs/biome`. Tests use built-in `node:test` + `node:assert/strict`; the
+  CLI uses `node:util` `parseArgs`.
 
 ## Commands
 
 ```sh
-deno task test       # deno test tests/                 — full test suite
-deno task check      # deno check **/*.ts               — type-check everything
-deno task cli        # deno run --allow-read bin/cli.ts — run the CLI locally
+npm test             # node --test "tests/*.test.ts"   — full test suite
+npm run check        # tsc --noEmit                    — type-check everything
+npm run build        # tsc -p tsconfig.build.json      — emit dist/ (npm only)
+npm run cli -- ...   # node bin/cli.ts                 — run the CLI locally
+npm run ci           # biome ci + check + test         — what CI runs
 
-deno check mod.ts                        # type-check the library entry
-deno run --allow-read bin/cli.ts --help  # CLI help / smoke test
-deno fmt                                 # format (config in jsr.json)
-deno lint                                # lint
+npx biome check --write .   # format + lint + organize imports (ts/json only)
 ```
 
 ### CI
 
-`.github/workflows/ci.yml` runs `deno fmt --check`, `deno lint`,
-`deno task check`, and `deno task test` on every push to `main` and on PRs.
-`.github/workflows/publish.yml` runs type-check + tests and then
-`npx jsr publish` on every push to `main`. Bumping `deno.json` `version` and
-merging to main publishes a new release — be deliberate about version bumps.
+`.github/workflows/ci.yml` runs `biome ci`, type-check, tests and build on
+Node 22 (minimum) and 26 (current LTS) for every push to `main` and on PRs, and checks that
+`package.json` and `jsr.json` versions match. `.github/workflows/publish.yml`
+runs type-check + tests on every push to `main`, then `npm publish
+--provenance` (skipped when that version is already on npm) and
+`npx jsr publish`. Bumping the version and merging to main publishes a new
+release — be deliberate about version bumps.
 
 ## Project Layout
 
@@ -48,10 +55,12 @@ tests/coverage.test.ts Exhaustive matrix: clause/value/nesting/passthrough
                   variants plus per-channel injection-resistance tests.
 tests/cli.test.ts End-to-end tests that shell out to `bin/cli.ts`.
 examples/         example.ts (tagged-template usage) and basic-query.sql.
-deno.json         Deno + JSR package manifest: name, version, exports, fmt
-                  config, tasks. (Was `jsr.json`; consolidated because Deno
-                  2.2.x reads `deno.json` for tasks — `jsr.json` tasks were
-                  dead config.)
+package.json      npm manifest: exports -> dist/, bin `literal-sql`, scripts.
+jsr.json          JSR manifest: exports -> .ts sources.
+tsconfig.json     Type-check config (noEmit, all .ts). tsconfig.build.json
+                  emits mod.ts + bin/cli.ts to dist/ with .ts -> .js import
+                  rewriting (`rewriteRelativeImportExtensions`).
+biome.json        Format + lint config (ts/json only; markdown untouched).
 ```
 
 ## Architecture
@@ -117,13 +126,13 @@ Pipeline:
 ### CLI
 
 `bin/cli.ts` reads a base query from `--file` or `--query`, then walks
-`Deno.args` in order and appends clauses via `parseQuery`. Output goes to
+`process.argv` in order and appends clauses via `parseQuery`. Output goes to
 stdout; parameters (if any) are printed as JSON below the query.
 
 ## Conventions
 
 - **Formatting:** 2-space indent, double quotes, semicolons required, line width
-  80 — all enforced by `deno fmt` via `jsr.json`.
+  80 — all enforced by Biome (`biome.json`).
 - **Exports:** keep the public surface minimal — only `SQLQuery` and `sql`.
   Internal helpers and state stay private (`_interpolate`, `splitConditions`,
   `formatJoinClause`, `parts`, `params`, `paramCounter`, `raw`).
@@ -135,7 +144,8 @@ stdout; parameters (if any) are printed as JSON below the query.
   fills gaps with `undefined` and trims only trailing undefined values.
 - **Tests:** expected SQL strings are written as arrays joined by `"\n"` for
   readability — match that style when adding tests. CLI tests shell out with
-  `Deno.Command`, so they exercise the real binary path.
+  `spawnSync(process.execPath, ["bin/cli.ts", ...])`, so they exercise the
+  real binary path.
 - **No query execution:** this library will never import a database driver.
 
 ## Gotchas
@@ -156,14 +166,14 @@ stdout; parameters (if any) are printed as JSON below the query.
 - `toString()` runs validation lazily — calling `.parameters` does not throw
   even if the query is invalid. Only `.toString()` / `.query` will throw.
   Passthrough queries (`WITH`/`UNION`/...) bypass the throw guard by design.
-- The CLI walks `Deno.args` manually (not `parseArgs` output) so that clause
+- The CLI walks `argv` manually (not `parseArgs` output) so that clause
   ordering on the command line is preserved in the output.
-- `tests/cli.test.ts` end-to-end tests shell out to `bin/cli.ts` via
-  `Deno.Command`, so the test runner needs `--allow-run` at the invocation
-  level (`deno task test` grants it; per-test `permissions: { run: true }`
-  cannot escalate if the runner was invoked without it). The expected arrays
-  were updated in 0.1.0 to match the multi-line `toString()` output — if you
-  re-break the formatter output, re-update those expectations.
+- `tests/cli.test.ts` end-to-end tests spawn `node bin/cli.ts`. The expected
+  arrays match the multi-line `toString()` output — if you re-break the
+  formatter output, re-update those expectations.
+- `bin/cli.ts` runs `main()` only when `realpath(argv[1])` is the module file
+  (works through the npm bin symlink; Node 22 has no `import.meta.main`).
+- npm can't load `.ts` from `node_modules`, hence the `dist/` build for npm.
 
 ## When to use which agent (oh-my-opencode-slim)
 
@@ -172,7 +182,7 @@ deliberately:
 
 - **`@explorer`** — fast read-only recon. Use first when a task touches code you
   haven't read yet (e.g. "where does `parseQuery` handle `OR`?").
-- **`@librarian`** — Deno / JSR / `@std/*` docs and behaviour questions, plus
+- **`@librarian`** — Node / npm / JSR docs and behaviour questions, plus
   any web research. The library touches Postgres semantics and JSR publishing —
   both areas where current docs matter.
 - **`@oracle`** — architecture and high-stakes reasoning for `SQLQuery`: parser
@@ -185,7 +195,7 @@ deliberately:
   additions. Hand oracle the design first when validation or parsing semantics
   are involved.
 - **`@reviewer`** (custom, via `/review*` commands) — runs `knip`, `jscpd`,
-  `deno lint`, `deno task check` before opinions. Use before merging non-trivial
+  `biome ci`, `npm run check` before opinions. Use before merging non-trivial
   changes to `mod.ts`.
 
 ### Routing rule of thumb
@@ -193,7 +203,7 @@ deliberately:
 - Touches `mod.ts` parser / formatter / validation → **@oracle** designs,
   **@fixer** implements.
 - Adds a test that mirrors existing patterns → **@fixer** directly.
-- "How does Deno / JSR / `@std/cli` handle X?" → **@librarian**.
+- "How does Node / npm / JSR handle X?" → **@librarian**.
 - "Where is X referenced across the repo?" → **@explorer**.
 
 ## Skills available in this workspace
@@ -213,9 +223,8 @@ it would only matter for a future docs site.
 
 ## Quality bar before merging
 
-1. `deno task check` passes (type-checks every `.ts` file).
-2. `deno task test` passes (sql.test.ts + cli.test.ts).
-3. `deno lint` clean.
-4. `deno fmt --check` clean (enforced by `.github/workflows/ci.yml`).
-5. If `mod.ts` public surface changed, bump `deno.json` `version` and document
-   the change in the commit message — pushes to `main` publish automatically.
+1. `npm run ci` passes (Biome, type-check, tests).
+2. `npm run build` succeeds.
+3. If the public surface changed or you want a release, bump `version` in
+   both `package.json` and `jsr.json` and document the change in the commit
+   message — pushes to `main` publish automatically.

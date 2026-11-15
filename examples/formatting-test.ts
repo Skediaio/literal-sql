@@ -20,7 +20,7 @@
  *   9. Nested function calls expand recursively (one arg per line).
  *  10. `undefined` → NULL literal; `null` → parameter.
  *
- * Run: deno run --allow-read examples/formatting-test.ts
+ * Run: node examples/formatting-test.ts
  */
 import { sql } from "../mod.ts";
 
@@ -35,8 +35,7 @@ console.log(sql`SELECT * FROM users u`.toString());
 // --- (3) JOIN — keyword on own line, AND inside ON on own line ---
 console.log("\n--- (3) JOIN with AND in ON clause ---");
 console.log(
-  sql`SELECT * FROM users u JOIN orders o ON o.user_id = u.id AND o.total > 0 AND o.status = 'paid'`
-    .toString(),
+  sql`SELECT * FROM users u JOIN orders o ON o.user_id = u.id AND o.total > 0 AND o.status = 'paid'`.toString(),
 );
 
 // --- (3b) Multiple JOIN types ---
@@ -53,22 +52,19 @@ console.log(
 // --- (4) WHERE with AND/OR — each on own line at column 0 ---
 console.log("\n--- (4) WHERE with mixed AND/OR (operators on own line) ---");
 console.log(
-  sql`SELECT * FROM products WHERE price > 100 AND category = 'tech' OR featured = true`
-    .toString(),
+  sql`SELECT * FROM products WHERE price > 100 AND category = 'tech' OR featured = true`.toString(),
 );
 
 // --- (5) Parenthesised condition groups ---
 console.log("\n--- (5) Parenthesised groups preserved on one line ---");
 console.log(
-  sql`SELECT * FROM users WHERE active = true AND (role = 'admin' OR role = 'editor') AND deleted = false`
-    .toString(),
+  sql`SELECT * FROM users WHERE active = true AND (role = 'admin' OR role = 'editor') AND deleted = false`.toString(),
 );
 
 // --- (6) GROUP BY / ORDER BY multiple terms ---
 console.log("\n--- (6) GROUP BY + ORDER BY (one term per line) ---");
 console.log(
-  sql`SELECT department, role, count(*) FROM employees GROUP BY department, role ORDER BY department ASC, role DESC`
-    .toString(),
+  sql`SELECT department, role, count(*) FROM employees GROUP BY department, role ORDER BY department ASC, role DESC`.toString(),
 );
 
 // --- (7) LIMIT / OFFSET (single line each) ---
@@ -81,8 +77,7 @@ const name = "Alice";
 const minAge = 25;
 const limit = 10;
 const offset = 5;
-const q8 =
-  sql`SELECT * FROM users WHERE name = ${name} AND age >= ${minAge} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+const q8 = sql`SELECT * FROM users WHERE name = ${name} AND age >= ${minAge} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 console.log(q8.toString());
 console.log("Parameters:", q8.parameters);
 
@@ -96,8 +91,7 @@ console.log(
 console.log("\n--- (10) undefined → NULL literal; null → parameter ---");
 const maybeName = undefined;
 const maybeManager = null;
-const q10 =
-  sql`SELECT * FROM users WHERE name = ${maybeName} AND manager_id = ${maybeManager}`;
+const q10 = sql`SELECT * FROM users WHERE name = ${maybeName} AND manager_id = ${maybeManager}`;
 console.log(q10.toString());
 console.log(
   "Parameters:",

@@ -8,9 +8,9 @@
  * Also demonstrates nesting SQLQuery fragments inside `${...}` for
  * parameter handling within condition groups.
  *
- * Run: deno run --allow-read examples/conditional-build.ts
+ * Run: node examples/conditional-build.ts
  */
-import { sql, type SQLQuery } from "../mod.ts";
+import { type SQLQuery, sql } from "../mod.ts";
 
 interface UserFilters {
   search?: string;
@@ -51,8 +51,7 @@ function buildUserQuery(filters: UserFilters): SQLQuery {
   }
 
   if (filters.minAge !== undefined && filters.maxAge !== undefined) {
-    query = query
-      .sql`AND u.age BETWEEN ${filters.minAge} AND ${filters.maxAge}`;
+    query = query.sql`AND u.age BETWEEN ${filters.minAge} AND ${filters.maxAge}`;
   } else if (filters.minAge !== undefined) {
     query = query.sql`AND u.age >= ${filters.minAge}`;
   }

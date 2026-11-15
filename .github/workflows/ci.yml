@@ -10,21 +10,31 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        node-version: [22.x, 26.x]
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: denoland/setup-deno@v2
+      - uses: actions/setup-node@v4
         with:
-          deno-version: v2.x
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
-      - name: Format check
-        run: deno fmt --check
+      - run: npm ci
 
-      - name: Lint
-        run: deno lint
+      - name: Lint + format check
+        run: npx biome ci .
 
       - name: Type check
-        run: deno task check
+        run: npm run check
 
       - name: Test
-        run: deno task test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: jsr.json and package.json versions match
+        run: node -e 'const a=require("./package.json").version,b=require("./jsr.json").version;if(a!==b){console.error(`package.json ${a} != jsr.json ${b}`);process.exit(1)}'
