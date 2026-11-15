@@ -4,10 +4,10 @@
  *
  * This module provides tools for building SQL queries safely and incrementally.
  * It handles parameter interpolation automatically (using $1, $2 style placeholders)
- * and helps prevent SQL injection vulnerabilities. SELECT queries are emitted
- * as consistently formatted, multi-line SQL for readability; DML statements
- * (INSERT/UPDATE/DELETE) and WITH/UNION/INTERSECT/EXCEPT queries pass through
- * verbatim so the formatter can never corrupt them.
+ * and helps prevent SQL injection vulnerabilities. Every statement (SELECT,
+ * DML, WITH, EXPLAIN, ...) takes appended clauses, each put where the
+ * statement expects it. Only SELECT statements are formatted as multi-line
+ * SQL; any other statement is returned as its text.
  *
  * @module
  *
@@ -83,11 +83,12 @@ interface Clause {
  * Everything the scanner must recognise to know what is quoted, commented
  * or nested: E'...' (backslash escapes), '...', "...", `...` (MySQL,
  * SQLite), line comment,
- * block-comment opener, dollar-quote opener, `$N`, brackets, CASE and END.
- * An unterminated quote runs to the end of the text.
+ * block-comment opener, dollar-quote opener, `$N`, brackets, CASE and END
+ * (not after a `.`: `t.end` is a column). An unterminated quote runs to the
+ * end of the text.
  */
 const TOKEN =
-  /(?<![\w$])E'(?:[^'\\]|\\[\s\S])*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|\b(?:CASE|END)\b/gi;
+  /(?<![\w$])E'(?:[^'\\]|\\[\s\S])*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|\b(?<!\.)(?:CASE|END)\b/gi;
 /**
  * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
  * LEFT/RIGHT/FULL [OUTER], INNER or CROSS, optionally preceded by NATURAL.
@@ -103,7 +104,7 @@ const JOIN_CLAUSE = new RegExp(
  * Clause keywords in statement order. The FROM of `IS [NOT] DISTINCT FROM`
  * is an operator, not a clause.
  */
-const CLAUSE_KEYWORDS = `SELECT|(?<!\\bDISTINCT\\s+)FROM|${JOIN_KEYWORD}|WHERE|GROUP\\s+BY|HAVING|WINDOW|ORDER\\s+BY|LIMIT|OFFSET|FETCH\\s+(?:FIRST|NEXT)|FOR\\s+(?:UPDATE|SHARE|NO\\s+KEY\\s+UPDATE|KEY\\s+SHARE)|RETURNING`;
+const CLAUSE_KEYWORDS = `SELECT|(?<!\\bIS\\s+(?:NOT\\s+)?DISTINCT\\s+)FROM|${JOIN_KEYWORD}|WHERE|GROUP\\s+BY|HAVING|WINDOW|ORDER\\s+BY|LIMIT|OFFSET|FETCH\\s+(?:FIRST|NEXT)|FOR\\s+(?:UPDATE|SHARE|NO\\s+KEY\\s+UPDATE|KEY\\s+SHARE)|RETURNING`;
 /** Position of each clause in a statement; LIMIT and OFFSET may swap. */
 const RANKS: Record<string, number> = {
   select: 1,
@@ -122,13 +123,15 @@ const RANKS: Record<string, number> = {
 };
 /**
  * Keywords after which a new run of clauses begins (the next SELECT of a set
- * operation, the action of ON CONFLICT or MERGE ... WHEN). Appended clauses
- * are placed among the clauses after the last one.
+ * operation, ON CONFLICT and its DO UPDATE / DO NOTHING action, MERGE ...
+ * WHEN). Appended clauses are placed among the clauses after the last one.
+ * A keyword after a `.` is a column (`t.offset`), never a clause.
  */
-const BARRIER_KEYWORDS = "UNION|INTERSECT|EXCEPT|ON\\s+CONFLICT|WHEN";
-const BARRIER = new RegExp(`\\b(?:${BARRIER_KEYWORDS})\\b`, "i");
+const BARRIER_KEYWORDS =
+  "UNION|INTERSECT|EXCEPT|ON\\s+CONFLICT|DO\\s+(?:UPDATE|NOTHING)|WHEN";
+const BARRIER = new RegExp(`\\b(?<!\\.)(?:${BARRIER_KEYWORDS})\\b`, "i");
 const CLAUSE_START = new RegExp(
-  `\\b(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS})\\b`,
+  `\\b(?<!\\.)(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS})\\b`,
   "gi",
 );
 /** The keyword an appended fragment starts with, if any. */
@@ -152,6 +155,8 @@ const LIST_CLAUSES = new Set([
 /** Clauses that hold a single value: appending replaces it. */
 const SINGLE_CLAUSES = new Set(["from", "limit", "offset", "fetch"]);
 /** How each database writes placeholder N; `?` is positional. */
+/** The opener each closer closes: END (by its first letter) closes CASE. */
+const OPENER: Record<string, string> = { ")": "(", "]": "[", e: "c" };
 const PLACEHOLDERS = {
   postgres: "$",
   mysql: "?",
@@ -206,25 +211,28 @@ function scan(text: string): Token[] {
  */
 function mask(text: string): string {
   let masked = "";
-  let depth = 0;
+  // The unclosed openers, innermost last: "(", "[" or "c" (CASE).
+  const open: string[] = [];
   let at = 0;
   const copy = (from: number, to: number, blank: boolean) => {
     masked += blank ? " ".repeat(to - from) : text.slice(from, to);
   };
   for (const { kind, start, end } of scan(text)) {
-    copy(at, start, depth > 0);
-    if (kind === "open") depth++;
+    copy(at, start, open.length > 0);
+    const first = text[start].toLowerCase();
     // A top-level `$N` stays, and so does an END without CASE (a plain
-    // word); an unmatched ")" is blanked.
+    // word); an unmatched ")" or "]" is blanked.
     copy(
       start,
       end,
-      depth > 0 || (kind === "close" ? end - start === 1 : kind !== "param"),
+      open.length > 0 || (kind === "close" ? first !== "e" : kind !== "param"),
     );
-    if (kind === "close") depth = Math.max(0, depth - 1);
+    if (kind === "open") open.push(first);
+    // A closer only closes its own kind: `(CASE ...)` does not end the CASE.
+    else if (kind === "close" && open.at(-1) === OPENER[first]) open.pop();
     at = end;
   }
-  copy(at, text.length, depth > 0);
+  copy(at, text.length, open.length > 0);
   return masked;
 }
 /**
@@ -340,8 +348,8 @@ function splitConditions(conditions: string): string[] {
   const masked = mask(conditions).replace(/\bBETWEEN\s[\s\S]+?\sAND\b/gi, (m) =>
     " ".repeat(m.length),
   );
-  // `$` guards placeholders such as "$and"; \b alone would split there.
-  return splitTopLevel(conditions, /(?<![\w$])(?:AND|OR)\b/gi, masked).map(
+  // `$` guards placeholders such as "$and", `.` columns such as `t.and`.
+  return splitTopLevel(conditions, /(?<![\w$.])(?:AND|OR)\b/gi, masked).map(
     (piece, i) => {
       const [, operator, condition] = piece.match(
         /^(?:(AND|OR)\b\s*)?([\s\S]*)$/i,
@@ -615,7 +623,7 @@ export class SQLQuery {
       return;
     }
     for (const piece of splitTopLevel(fragment, CLAUSE_START, masked)) {
-      this.place(piece, builder);
+      this.place(piece);
     }
   }
   /**
@@ -623,7 +631,7 @@ export class SQLQuery {
    * condition in its place in the statement text.
    * @private
    */
-  private place(piece: string, builder: boolean): void {
+  private place(piece: string): void {
     let keyword = piece.match(FRAGMENT_START)?.[0] ?? "";
     let content = piece.slice(keyword.length).trim();
     const clauses = findClauses(this.text, this.mask);
@@ -639,12 +647,11 @@ export class SQLQuery {
       const target =
         conditions.filter((c) => c.key === this.lastCondition).at(-1) ??
         conditions.at(-1);
-      if (target || !builder) {
-        const at = target ? target.end : this.text.length;
-        this.splice(at, at, piece);
+      if (target) {
+        this.splice(target.end, target.end, piece);
         return;
       }
-      // No condition yet: this one starts the WHERE.
+      // No condition yet, in any statement: this one starts the WHERE.
       keyword = "";
     }
     if (!keyword) [keyword, content] = ["WHERE", content || piece];

@@ -115,8 +115,8 @@ OPTIONS:
   -q, --query QUERY     Specify SQL query directly
   --where CONDITION     Add a WHERE clause (ANDed onto an existing WHERE)
   --and CONDITION       Continue the condition written last (JOIN ... ON,
-                        WHERE or HAVING) with AND; in a SELECT without
-                        one, start the WHERE clause
+                        WHERE or HAVING) with AND; without one, start
+                        the WHERE clause
   --or CONDITION        Like --and, with OR
   --join TEXT           Add a JOIN clause
   --left-join TEXT      Add a LEFT JOIN clause

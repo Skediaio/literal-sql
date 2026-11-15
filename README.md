@@ -184,11 +184,16 @@ report = report.sql`WHERE total > ${min}`.sql`LIMIT ${10}`;
 - `ORDER BY`, `GROUP BY`, `SELECT` and `RETURNING` extend their list;
   `LIMIT`, `OFFSET` and `FROM` replace the previous value.
 - `AND ...` / `OR ...` continue the condition written last — a `JOIN ... ON`,
-  the `WHERE`, or the `HAVING`.
+  the `WHERE`, or the `HAVING`. Without one they start the `WHERE`, in any
+  statement.
 - A fragment that is not a clause (`SET ...`, `ON CONFLICT ...`,
   `UNION ALL SELECT ...`) is attached at the end, as written.
-- If a clause could go in more than one place (for example a `WHERE` on an
-  `INSERT ... ON CONFLICT ... WHERE ... DO UPDATE ... WHERE ...`), `.sql`
+- After a `UNION` / `INTERSECT` / `EXCEPT`, an `ON CONFLICT`, its
+  `DO UPDATE` / `DO NOTHING`, or a `WHEN`, only the clauses that follow count:
+  a `WHERE` on `INSERT ... ON CONFLICT (a) WHERE p DO UPDATE SET b = 1 WHERE q`
+  is ANDed onto `q`.
+- If a clause could go in more than one place (for example a `WHERE` on
+  `SELECT ... FOR UPDATE LIMIT 1`, whose clauses are out of order), `.sql`
   throws instead of guessing.
 
 ## Other databases
@@ -332,8 +337,8 @@ OPTIONS:
   -q, --query QUERY     Specify SQL query directly
   --where CONDITION     Add a WHERE clause (ANDed onto an existing WHERE)
   --and CONDITION       Continue the condition written last (JOIN ... ON,
-                        WHERE or HAVING) with AND; in a SELECT without
-                        one, start the WHERE clause
+                        WHERE or HAVING) with AND; without one, start
+                        the WHERE clause
   --or CONDITION        Like --and, with OR
   --join TEXT           Add a JOIN clause
   --left-join TEXT      Add a LEFT JOIN clause

@@ -156,4 +156,130 @@ describe("Review: AND / OR without a condition", () => {
       ["WITH x AS (SELECT 1 AS a) SELECT * FROM x", "WHERE a = 1"].join("\n"),
     );
   });
+
+  test("AND on an EXPLAIN without WHERE starts the WHERE", () => {
+    const out = append(q("EXPLAIN SELECT * FROM t"), "AND a = 1").toString();
+    assertEquals(out, ["EXPLAIN SELECT * FROM t", "WHERE a = 1"].join("\n"));
+  });
+});
+
+describe("Review: regression variants", () => {
+  test("a column named end in a DML subquery leaves a top-level WHERE", () => {
+    const out = append(
+      q("UPDATE t SET a = (SELECT max(e.end) FROM e WHERE e.id = t.id)"),
+      "WHERE t.b",
+    ).toString();
+    assertEquals(
+      out,
+      [
+        "UPDATE t SET a = (SELECT max(e.end) FROM e WHERE e.id = t.id)",
+        "WHERE t.b",
+      ].join("\n"),
+    );
+  });
+
+  test("a column named end in a select-list subquery", () => {
+    const out = append(
+      q("SELECT (SELECT max(e.end) FROM e) AS m FROM u"),
+      "WHERE u.a",
+    ).toString();
+    assertEquals(
+      out,
+      [
+        "SELECT",
+        "  (SELECT max(e.end) FROM e) AS m",
+        "FROM",
+        "  u",
+        "WHERE",
+        "  u.a",
+      ].join("\n"),
+    );
+  });
+
+  test("a column named returning is not the RETURNING clause", () => {
+    const out = append(q("UPDATE t SET a = t.returning"), "WHERE b");
+    assertEquals(
+      out.toString(),
+      ["UPDATE t SET a = t.returning", "WHERE b"].join("\n"),
+    );
+  });
+
+  test("qualified columns named and, or, join, union, when, limit", () => {
+    const out = append(
+      q(
+        "SELECT t.limit, t.or FROM t JOIN s ON s.join = t.union WHERE t.when = 1 AND t.and = 2",
+      ),
+      "WHERE b",
+    ).toString();
+    assertEquals(
+      out,
+      [
+        "SELECT",
+        "  t.limit,",
+        "  t.or",
+        "FROM",
+        "  t",
+        "JOIN",
+        "  s ON s.join = t.union",
+        "WHERE",
+        "  t.when = 1",
+        "AND",
+        "  t.and = 2",
+        "AND",
+        "  b",
+      ].join("\n"),
+    );
+  });
+
+  test("SELECT DISTINCT(col) FROM: an appended FROM replaces the one FROM", () => {
+    const out = append(
+      q("SELECT DISTINCT(email) FROM users"),
+      "FROM other",
+    ).toString();
+    assertEquals(
+      out,
+      ["SELECT", "  DISTINCT(", "    email", "  )", "FROM", "  other"].join(
+        "\n",
+      ),
+    );
+  });
+
+  test("CASE nested in parentheses and in another CASE still masks", () => {
+    const nested = append(
+      q("SELECT (CASE WHEN a THEN 1 ELSE 2 END) AS c FROM t"),
+      "WHERE z",
+    ).toString();
+    assertEquals(
+      nested,
+      [
+        "SELECT",
+        "  (CASE WHEN a THEN 1 ELSE 2 END) AS c",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  z",
+      ].join("\n"),
+    );
+    const inCase = append(
+      q(
+        "SELECT CASE WHEN a THEN CASE WHEN b THEN 1 ELSE 2 END ELSE 3 END AS c FROM t",
+      ),
+      "WHERE z",
+    ).toString();
+    assertEquals(
+      inCase,
+      [
+        "SELECT",
+        "  CASE WHEN a THEN CASE WHEN b THEN 1 ELSE 2 END ELSE 3 END AS c",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  z",
+      ].join("\n"),
+    );
+  });
+
+  test("a top-level END without CASE is a plain word", () => {
+    assertEquals(q("BEGIN; SELECT 1; END").toString(), "BEGIN; SELECT 1; END");
+  });
 });

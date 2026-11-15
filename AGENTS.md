@@ -99,8 +99,10 @@ Building blocks:
    All splitting (clauses, AND/OR, commas) is `splitTopLevel(text, pattern)`.
 2. **Clauses** (`findClauses`) — top-level clause keywords with a rank
    (`RANKS`: SELECT, FROM, JOIN, WHERE, GROUP BY, HAVING, WINDOW, ORDER BY,
-   LIMIT/OFFSET, FETCH, FOR, RETURNING). Set operations, `ON CONFLICT` and
-   `WHEN` are *barriers*: only the clauses after the last one are considered.
+   LIMIT/OFFSET, FETCH, FOR, RETURNING). Set operations, `ON CONFLICT`,
+   `DO UPDATE` / `DO NOTHING` and `WHEN` are *barriers*: only the clauses
+   after the last one are considered. A keyword right after a `.` (`t.end`,
+   `s.offset`) is a column, never a clause, barrier, CASE or END.
    This works for any statement (SELECT, DML, `WITH ...`, `EXPLAIN ...`);
    no grammar is involved.
 3. **Interpolation** (`_interpolate`) — substitutes each `${value}` with `$N`
@@ -118,13 +120,13 @@ Building blocks:
      first clause with a higher rank, else at the end.
    - `AND` / `OR`: attached, as written, to the end of the `lastCondition`
      clause (default: the last condition in the text). Without any condition
-     it starts a `WHERE` in a SELECT.
+     it starts a `WHERE`, placed by rank, in any statement.
    - a bare condition is a `WHERE` in a SELECT; in any other statement a
      fragment that does not start with a clause keyword (`SET ...`,
      `ON CONFLICT ...`, `UNION ...`) is attached at the end as written.
    - if the statement repeats a clause or has clauses out of order and the
-     new clause would have to go among them, `place` **throws** rather than
-     guess.
+     new clause would have to go among them (a `WHERE` on
+     `SELECT ... FOR UPDATE LIMIT 1`), `place` **throws** rather than guess.
 5. **Formatting** (`toString`) — only text that starts with a SELECT-statement
    clause keyword and has no barrier is formatted; every other statement is
    returned as its `text`. Formatting walks the clauses in text order

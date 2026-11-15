@@ -278,11 +278,28 @@ describe("Appends are placed by clause order in any statement", () => {
     );
   });
 
-  test("a clause that could go in two places throws", () => {
+  test("the DO UPDATE action of ON CONFLICT starts a new clause scope", () => {
     const base = q(
       "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) WHERE p DO UPDATE SET a = 2 WHERE t.b",
     );
-    throws(() => base.sql`WHERE z`, /ambiguous/i);
+    assertEquals(
+      base.sql`WHERE z`.toString(),
+      [
+        "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) WHERE p DO UPDATE SET a = 2",
+        "WHERE t.b",
+        "AND z",
+      ].join("\n"),
+    );
+    assertEquals(
+      q(
+        "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) WHERE p DO UPDATE SET a = 2 WHERE t.b OR t.c",
+      ).sql`WHERE z`.toString(),
+      [
+        "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) WHERE p DO UPDATE SET a = 2",
+        "WHERE (t.b OR t.c)",
+        "AND z",
+      ].join("\n"),
+    );
     // A clause that can only go at the end is still fine.
     assertEquals(
       norm(base.sql`RETURNING id`.toString()),
@@ -290,6 +307,13 @@ describe("Appends are placed by clause order in any statement", () => {
         "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) WHERE p DO UPDATE SET a = 2 WHERE t.b RETURNING id",
       ),
     );
+  });
+
+  test("a clause that could go in two places throws", () => {
+    // PostgreSQL accepts FOR UPDATE before LIMIT: the clauses are out of order.
+    const base = q("SELECT * FROM jobs FOR UPDATE SKIP LOCKED LIMIT 1");
+    throws(() => base.sql`WHERE z`, /ambiguous/i);
+    throws(() => base.sql`ORDER BY id`, /ambiguous/i);
   });
 });
 
