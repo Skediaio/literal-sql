@@ -113,17 +113,19 @@ USAGE:
 OPTIONS:
   -f, --file FILE       Read base SQL query from FILE
   -q, --query QUERY     Specify SQL query directly
-  --where CONDITION     Add a WHERE clause
-  --and CONDITION       Add an AND condition to the WHERE clause
-  --or CONDITION        Add an OR condition to the WHERE clause
+  --where CONDITION     Add a WHERE clause (ANDed onto an existing WHERE)
+  --and CONDITION       Continue the condition written last (JOIN ... ON,
+                        WHERE or HAVING) with AND; in a SELECT without
+                        one, start the WHERE clause
+  --or CONDITION        Like --and, with OR
   --join TEXT           Add a JOIN clause
   --left-join TEXT      Add a LEFT JOIN clause
   --right-join TEXT     Add a RIGHT JOIN clause
   --inner-join TEXT     Add an INNER JOIN clause
-  --group-by EXPR       Add a GROUP BY clause
-  --order-by EXPR       Add an ORDER BY clause
-  --limit NUMBER        Add a LIMIT clause
-  --offset NUMBER       Add an OFFSET clause
+  --group-by EXPR       Add GROUP BY terms (extends an existing GROUP BY)
+  --order-by EXPR       Add ORDER BY terms (extends an existing ORDER BY)
+  --limit NUMBER        Set the LIMIT (replaces an existing one)
+  --offset NUMBER       Set the OFFSET (replaces an existing one)
   -h, --help            Show this help message
 
 EXAMPLES:

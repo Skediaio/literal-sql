@@ -710,7 +710,7 @@ test("Complex query with multiple clauses built incrementally", () => {
 
   query = query.sql`JOIN orders o ON u.id = o.user_id`; // Add JOIN
   query = query.sql`WHERE u.name LIKE ${"%" + name + "%"}`; // Add WHERE
-  query = query.sql`AND o.order_date > ${minDate}`; // Add AND to WHERE
+  query = query.sql`AND o.order_date > ${minDate}`; // AND continues the WHERE (the condition written last)
   query = query.sql`GROUP BY u.id, u.name, u.email, o.order_date`; // Add GROUP BY
   query = query.sql`ORDER BY o.order_date DESC`; // Add ORDER BY
   query = query.sql`LIMIT ${limit}`; // Add LIMIT
