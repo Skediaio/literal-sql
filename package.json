@@ -1,6 +1,6 @@
 {
   "name": "@skedia/literal-sql",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Lightweight, zero-dependency raw SQL query builder using tagged template literals (PostgreSQL $1, $2, ... placeholders).",
   "license": "MIT",
   "type": "module",

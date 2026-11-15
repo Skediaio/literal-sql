@@ -840,28 +840,19 @@ test("Building query conditionally", () => {
 // --- Edge Case Tests ---
 
 test("Empty initial query", () => {
-  // What happens if we start with an empty template?
+  // An empty template is an empty fragment, not an implicit SELECT *.
   const query = sql``;
-  // Should default to SELECT * as no SELECT clause was provided.
-  // Formatting rules don't apply much here.
-  const expected = "SELECT\n  *"; // Apply basic SELECT formatting
-  assertEquals(query.toString(), expected);
+  assertEquals(query.toString(), "");
   assertEquals(query.parameters, []);
 });
 
 test("Initial query with only parameters (likely invalid SQL)", () => {
   const val1 = 1;
   const val2 = "test";
-  // How does the parser handle this? It might try to parse $1 as a clause.
+  // Text that does not start with a clause keyword is a bare fragment and
+  // is kept verbatim (no SELECT is invented around it).
   const query = sql`${val1} ${val2}`;
-  // Current parser likely fails, toString defaults to SELECT *.
-  // The parameters are captured correctly though.
-  // Expected format based on previous tests: Parser treats parameters as SELECT list.
-  const expected = [
-    "SELECT",
-    "  $1 $2", // Parameters treated as single select item here
-  ].join("\n");
-  assertEquals(query.toString(), expected);
+  assertEquals(query.toString(), "$1 $2");
   assertEquals(query.parameters, [val1, val2]);
 });
 

@@ -110,7 +110,7 @@ test("Window function alongside a parameterised field", () => {
 
 test("Whitespace-only template behaves like the empty template", () => {
   const query = sql`   `;
-  assertEquals(query.toString(), "SELECT\n  *");
+  assertEquals(query.toString(), "");
   assertEquals(query.parameters, []);
 });
 
@@ -506,7 +506,7 @@ test("Same fragment object used twice duplicates its parameters", () => {
   assertEquals(query.parameters, [10, 10]);
 });
 
-test("Nesting a chained query inlines its multi-line raw text", () => {
+test("Nesting a chained query inlines its formatted text", () => {
   let sub = sql`SELECT id FROM orders WHERE total > ${100}`;
   sub = sub.sql`AND status = ${"paid"}`;
   const query = sql`SELECT * FROM users WHERE id IN (${sub})`;
@@ -518,8 +518,14 @@ test("Nesting a chained query inlines its multi-line raw text", () => {
       "FROM",
       "  users",
       "WHERE",
-      "  id IN (SELECT id FROM orders WHERE total > $1",
-      "AND status = $2)",
+      "  id IN (SELECT",
+      "  id",
+      "FROM",
+      "  orders",
+      "WHERE",
+      "  total > $1",
+      "AND",
+      "  status = $2)",
     ].join("\n"),
   );
   assertEquals(query.parameters, [100, "paid"]);

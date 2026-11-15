@@ -24,6 +24,21 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { SQLQuery } from "../mod.ts";
 
+/** Clause flags and the SQL keyword each one appends. */
+const CLAUSE_FLAGS: Record<string, string> = {
+  "--where": "WHERE",
+  "--and": "AND",
+  "--or": "OR",
+  "--join": "JOIN",
+  "--left-join": "LEFT JOIN",
+  "--right-join": "RIGHT JOIN",
+  "--inner-join": "INNER JOIN",
+  "--group-by": "GROUP BY",
+  "--order-by": "ORDER BY",
+  "--limit": "LIMIT",
+  "--offset": "OFFSET",
+};
+
 /**
  * Builds an SQL query based on provided arguments
  */
@@ -62,41 +77,20 @@ export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
     }
 
     // Initialize the SQL query
-    let query = new SQLQuery();
+    const query = new SQLQuery();
     query.parseInitialQuery(baseQuery);
 
-    // Apply conditions in the order they were provided on the command line
+    // Apply clauses in the order they were provided on the command line.
+    // Both `--where COND` and `--where=COND` are accepted.
     for (let i = 0; i < argsList.length; i++) {
-      const arg = argsList[i];
-
-      // Function to directly append SQL clauses without parameters
-      const appendClause = (clause: string, condition: string) => {
-        query.parseQuery(`${clause} ${condition}`);
-        return query;
-      };
-
-      if (arg === "--where" && i + 1 < argsList.length) {
-        query = appendClause("WHERE", argsList[++i]);
-      } else if (arg === "--and" && i + 1 < argsList.length) {
-        query = appendClause("AND", argsList[++i]);
-      } else if (arg === "--or" && i + 1 < argsList.length) {
-        query = appendClause("OR", argsList[++i]);
-      } else if (arg === "--join" && i + 1 < argsList.length) {
-        query = appendClause("JOIN", argsList[++i]);
-      } else if (arg === "--left-join" && i + 1 < argsList.length) {
-        query = appendClause("LEFT JOIN", argsList[++i]);
-      } else if (arg === "--right-join" && i + 1 < argsList.length) {
-        query = appendClause("RIGHT JOIN", argsList[++i]);
-      } else if (arg === "--inner-join" && i + 1 < argsList.length) {
-        query = appendClause("INNER JOIN", argsList[++i]);
-      } else if (arg === "--group-by" && i + 1 < argsList.length) {
-        query = appendClause("GROUP BY", argsList[++i]);
-      } else if (arg === "--order-by" && i + 1 < argsList.length) {
-        query = appendClause("ORDER BY", argsList[++i]);
-      } else if (arg === "--limit" && i + 1 < argsList.length) {
-        query = appendClause("LIMIT", argsList[++i]);
-      } else if (arg === "--offset" && i + 1 < argsList.length) {
-        query = appendClause("OFFSET", argsList[++i]);
+      const eq = argsList[i].indexOf("=");
+      const inline = argsList[i].startsWith("--") && eq > 0;
+      const clause =
+        CLAUSE_FLAGS[inline ? argsList[i].slice(0, eq) : argsList[i]];
+      if (!clause) continue;
+      if (inline) query.parseQuery(`${clause} ${argsList[i].slice(eq + 1)}`);
+      else if (i + 1 < argsList.length) {
+        query.parseQuery(`${clause} ${argsList[++i]}`);
       }
     }
 
@@ -130,7 +124,6 @@ OPTIONS:
   --order-by EXPR       Add an ORDER BY clause
   --limit NUMBER        Add a LIMIT clause
   --offset NUMBER       Add an OFFSET clause
-  --no-format           Disable query formatting
   -h, --help            Show this help message
 
 EXAMPLES:
