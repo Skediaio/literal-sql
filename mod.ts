@@ -154,9 +154,9 @@ const LIST_CLAUSES = new Set([
 ]);
 /** Clauses that hold a single value: appending replaces it. */
 const SINGLE_CLAUSES = new Set(["from", "limit", "offset", "fetch"]);
-/** How each database writes placeholder N; `?` is positional. */
 /** The opener each closer closes: END (by its first letter) closes CASE. */
 const OPENER: Record<string, string> = { ")": "(", "]": "[", e: "c" };
+/** How each database writes placeholder N; `?` is positional. */
 const PLACEHOLDERS = {
   postgres: "$",
   mysql: "?",
