@@ -264,6 +264,29 @@ function stripComments(text: string): string {
     : text;
   return stripped.replace(/;\s*$/, "").trim();
 }
+/**
+ * The first `$N` token of `text` that starts inside one of the
+ * `[start, end)` offset pairs in `ranges`, or "" if there is none.
+ */
+function findParam(text: string, ranges = [0, text.length]): string {
+  for (const { kind, start, end } of scan(text)) {
+    if (kind !== "param") continue;
+    for (let i = 0; i < ranges.length; i += 2) {
+      if (start >= ranges[i] && start < ranges[i + 1]) {
+        return text.slice(start, end);
+      }
+    }
+  }
+  return "";
+}
+/** Throws when `placeholder` (hand-written) would share numbers with `params`. */
+function assertNotMixed(placeholder: string, params: unknown[]): void {
+  if (placeholder && params.length > 0) {
+    throw new Error(
+      `The hand-written placeholder ${placeholder} cannot be combined with \${value} parameters: their numbers collide. Write \${value} instead of ${placeholder}.`,
+    );
+  }
+}
 /** Normalises a matched clause keyword ("left  join", "ORDER BY") to its key. */
 function clauseKey(keyword: string): string {
   if (/join$/i.test(keyword)) return "join";
@@ -471,6 +494,8 @@ export class SQLQuery {
   private masked: string | null = null;
   /** The condition clause an AND/OR fragment continues: join, where or having. */
   private lastCondition = "";
+  /** The first `$N` the author wrote by hand, or "": see `assertNotMixed`. */
+  private handWritten = "";
   /**
    * Creates a new SQLQuery instance.
    * If called with template literals, it interpolates values and parses the initial query string.
@@ -480,9 +505,15 @@ export class SQLQuery {
    */
   constructor(strings?: TemplateStringsArray, ...values: unknown[]) {
     if (strings && strings.raw.length > 0) {
-      const { text, params } = this._interpolate(strings, values, []);
+      const { text, params, handWritten } = this._interpolate(
+        strings,
+        values,
+        [],
+      );
+      assertNotMixed(handWritten, params);
       this.params = params;
-      this.parseInitialQuery(text);
+      this.handWritten = handWritten;
+      this.text = stripComments(text);
     }
   }
   /**
@@ -494,19 +525,28 @@ export class SQLQuery {
    * @param strings - Template strings array.
    * @param values - Values to be interpolated.
    * @param startParams - Parameters already collected (not mutated).
-   * @returns The interpolated SQL text and the extended parameter list.
+   * @returns The interpolated SQL text, the extended parameter list and the
+   * first hand-written placeholder ("" if none).
    * @private
    */
   private _interpolate(
     strings: TemplateStringsArray,
     values: unknown[],
     startParams: unknown[],
-  ): { text: string; params: unknown[] } {
+  ): { text: string; params: unknown[]; handWritten: string } {
     let params = startParams;
+    let handWritten = "";
+    // [start, end) offsets of the template's own text, the only place a
+    // hand-written placeholder can come from.
+    const ranges: number[] = [];
+    let dollar = false;
     const text = strings.reduce((result, string, i) => {
+      ranges.push(result.length, result.length + string.length);
+      dollar ||= string.includes("$");
       if (i >= values.length) return result + string;
       const value = values[i];
       if (value instanceof SQLQuery) {
+        handWritten ||= value.handWritten;
         const shift = params.length;
         params = params.concat(value.params);
         // Nothing to renumber; keeps building long lists by nesting cheap.
@@ -527,7 +567,9 @@ export class SQLQuery {
       params = [...params, value];
       return `${result}${string}$${params.length}`;
     }, "");
-    return { text, params };
+    // Scanning is only needed when the template itself has a `$`.
+    if (!handWritten && dollar) handWritten = findParam(text, ranges);
+    return { text, params, handWritten };
   }
   /**
    * Sets the statement text (comments and a trailing `;` are stripped).
@@ -535,6 +577,9 @@ export class SQLQuery {
    * @param query - The initial SQL query string.
    */
   parseInitialQuery(query: string): void {
+    const handWritten = query.includes("$") ? findParam(query) : "";
+    assertNotMixed(handWritten, this.params);
+    this.handWritten = handWritten;
     this.text = stripComments(query);
   }
   /**
@@ -543,9 +588,21 @@ export class SQLQuery {
    * (`SET ...`, `ON CONFLICT ...`, `UNION ...`) is attached as written.
    *
    * @param query - The query fragment string to append.
-   * @throws {Error} If a clause could go in more than one place.
+   * @throws {Error} If a clause could go in more than one place, or if a
+   * hand-written `$N` meets `${value}` parameters.
    */
   parseQuery(query: string): void {
+    const handWritten =
+      this.handWritten || (query.includes("$") ? findParam(query) : "");
+    assertNotMixed(handWritten, this.params);
+    this.handWritten = handWritten;
+    this.append(query);
+  }
+  /**
+   * Appends a fragment whose placeholders were already checked.
+   * @private
+   */
+  private append(query: string): void {
     // Comments are stripped so a trailing "-- note" in a fragment can't
     // comment out whatever follows it.
     const fragment = stripComments(query);
@@ -760,9 +817,15 @@ export class SQLQuery {
     newQuery.masked = this.masked;
     newQuery.lastCondition = this.lastCondition;
     // Number the fragment's parameters after the existing ones.
-    const { text, params } = this._interpolate(strings, values, this.params);
+    const { text, params, handWritten } = this._interpolate(
+      strings,
+      values,
+      this.params,
+    );
+    newQuery.handWritten = this.handWritten || handWritten;
+    assertNotMixed(newQuery.handWritten, params);
     newQuery.params = params;
-    newQuery.parseQuery(text);
+    newQuery.append(text);
     return newQuery;
   }
 }

@@ -19,7 +19,7 @@ import {
   throws,
 } from "node:assert/strict";
 import { describe, test } from "node:test";
-import { type SQLQuery, sql } from "../mod.ts";
+import { SQLQuery, sql } from "../mod.ts";
 
 function norm(s: string): string {
   return s
@@ -358,5 +358,113 @@ describe("Nesting inlines the statement in clause order", () => {
         "ORDER BY id)",
       ].join("\n"),
     );
+  });
+});
+
+describe("Hand-written placeholders", () => {
+  const mixed = /hand-written placeholder \$1.*\$\{value\}/;
+
+  test("$1 in quotes, dollar quotes or comments is not a placeholder", () => {
+    const query = sql`SELECT 'costs $1', $$a $1$$ /* $1 */ FROM t WHERE a = ${1}`;
+    assertEquals(
+      query.toString(),
+      [
+        "SELECT",
+        "  'costs $1',",
+        "  $$a $1$$",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  a = $1",
+      ].join("\n"),
+    );
+    assertEquals(query.parameters, [1]);
+  });
+
+  test("a dollar-quoted body appended after a value keeps its $1", () => {
+    const query = sql`SELECT * FROM t WHERE a = ${1}`.sql`AND b = $$x $1$$`;
+    assertEquals(
+      query.toString(),
+      [
+        "SELECT",
+        "  *",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  a = $1",
+        "AND",
+        "  b = $$x $1$$",
+      ].join("\n"),
+    );
+  });
+
+  test("only hand-written placeholders (as the CLI builds them) are fine", () => {
+    const query = new SQLQuery();
+    query.parseInitialQuery("SELECT * FROM t WHERE id = $1");
+    query.parseQuery("WHERE a = $2");
+    assertEquals(
+      query.toString(),
+      [
+        "SELECT",
+        "  *",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  id = $1",
+        "AND",
+        "  a = $2",
+      ].join("\n"),
+    );
+    assertEquals(query.parameters, []);
+    assertEquals(q("SELECT $1").sql`WHERE a = $2`.parameters, []);
+  });
+
+  test("placeholders of a nested query with values are library-numbered", () => {
+    const inner = sql`SELECT id FROM u WHERE x = ${"x"}`;
+    const query = sql`SELECT * FROM t WHERE a = ${1} AND id IN (${inner})`;
+    assertEquals(
+      query.toString(),
+      [
+        "SELECT",
+        "  *",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  a = $1",
+        "AND",
+        "  id IN (SELECT id FROM u WHERE x = $2)",
+      ].join("\n"),
+    );
+    assertEquals(query.parameters, [1, "x"]);
+  });
+
+  test("throws when one template has both", () => {
+    throws(() => sql`SELECT $1::int, ${"a"}`, mixed);
+  });
+
+  test("throws when a value is appended to hand-written text", () => {
+    throws(() => q("SELECT * FROM t WHERE b = $1").sql`AND a = ${1}`, mixed);
+    const query = new SQLQuery();
+    query.parseInitialQuery("SELECT $1");
+    throws(() => query.sql`WHERE a = ${1}`, mixed);
+  });
+
+  test("throws when hand-written text is appended after a value", () => {
+    throws(() => sql`SELECT * FROM t WHERE a = ${1}`.sql`AND b = $1`, mixed);
+    const query = sql`SELECT * FROM t WHERE a = ${1}`;
+    throws(() => query.parseQuery("AND b = $1"), mixed);
+  });
+
+  test("throws when a nested query brings hand-written placeholders", () => {
+    const inner = q("SELECT id FROM u WHERE x = $1");
+    throws(
+      () => sql`SELECT * FROM t WHERE a = ${1} AND id IN (${inner})`,
+      mixed,
+    );
+  });
+
+  test("throws when a nested query brings values into hand-written text", () => {
+    const inner = sql`SELECT id FROM u WHERE x = ${"x"}`;
+    throws(() => sql`SELECT * FROM t WHERE a = $1 AND id IN (${inner})`, mixed);
   });
 });

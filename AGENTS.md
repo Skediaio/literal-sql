@@ -175,11 +175,13 @@ stdout; parameters (if any) are printed as JSON below the query.
   syntax that puts a clause keyword at top level in another role needs an
   entry in `CLAUSE_KEYWORDS` / `BARRIER_KEYWORDS`, with a test in
   `tests/spec.test.ts`.
-- Not handled: a hand-written `$N` next to `${}` values (numbers collide),
-  backslash escapes in plain `'...'` (only with
+- Not handled: backslash escapes in plain `'...'` (only with
   `standard_conforming_strings = off`, or MySQL's default; adding them
   would break standard strings such as `'C:\'`), MySQL `#` comments
   (`#>` is a PostgreSQL operator), and re-formatting of subqueries.
+- A hand-written `$N` (a `param` token in template text or in a string given
+  to `parseInitialQuery` / `parseQuery`) is fine while the query has no
+  `${}` parameters; combining both throws at build time (`handWritten` field).
 - `toString()` runs validation lazily — calling `.parameters` does not throw
   even if the query is invalid. Only `.toString()` / `.query` will throw.
   Statements that are not formatted never throw there.

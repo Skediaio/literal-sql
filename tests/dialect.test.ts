@@ -105,11 +105,6 @@ describe("dialect(): positional parameters follow the text", () => {
     );
   });
 
-  test("a placeholder that occurs twice yields its value twice", () => {
-    const query = sql`SELECT * FROM t WHERE a = ${5} OR b = $1`;
-    assertEquals(query.dialect("sqlite").parameters, [5, 5]);
-  });
-
   test("$1 in quoted text or dollar quotes is not a placeholder", () => {
     const query = sql`SELECT '$1' AS a, $$ $1 $$ AS b FROM t WHERE c = ${7}`;
     assertEquals(query.dialect("mysql"), {

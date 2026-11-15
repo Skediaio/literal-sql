@@ -232,6 +232,10 @@ MySQL `#` comments; use `--` comments and doubled quotes (`''`).
 > values can vanish from the parameter list, but if you meant to filter on
 > null, write `IS NULL` explicitly — or pass `null`, which stays a parameter.
 
+A hand-written placeholder (`WHERE id = $1`) only works in a query without
+`${}` values; mixing both throws, since the numbers would collide. `$1` inside
+quotes or comments is just text.
+
 Because `${value}` can never become SQL text, injection through values is
 architecturally impossible — the test suite locks this in with dedicated
 injection-resistance tests.
