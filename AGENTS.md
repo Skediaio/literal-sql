@@ -59,6 +59,8 @@ tests/robustness.test.ts Token-preservation corpus, fuzzing, injection,
                   defect that was found and fixed.
 tests/spec.test.ts Specification of the scanner (every quoting form), of
                   clause placement in any statement, and of AND/OR targets.
+tests/dialect.test.ts `dialect()` placeholder styles and backtick / bracket
+                  identifiers.
 examples/         example.ts (tagged-template usage) and basic-query.sql.
 package.json      npm manifest: exports -> dist/, bin `literal-sql`, scripts.
 jsr.json          JSR manifest: exports -> .ts sources.
@@ -83,7 +85,7 @@ returns a new `SQLQuery`. Its whole state is three private fields:
 (`masked` is a cache of `mask(text)`, kept in step by `splice`.)
 
 The public surface is the constructor, `sql`/`.sql`, `toString()`, `.query`,
-`.parameters`, plus `parseInitialQuery`/`parseQuery` used by the CLI.
+`.parameters`, `dialect()`, plus `parseInitialQuery`/`parseQuery` used by the CLI.
 Everything else is a module-level function in `mod.ts`.
 
 Building blocks:
@@ -175,7 +177,9 @@ stdout; parameters (if any) are printed as JSON below the query.
   `tests/spec.test.ts`.
 - Not handled: a hand-written `$N` next to `${}` values (numbers collide),
   backslash escapes in plain `'...'` (only with
-  `standard_conforming_strings = off`), and re-formatting of subqueries.
+  `standard_conforming_strings = off`, or MySQL's default; adding them
+  would break standard strings such as `'C:\'`), MySQL `#` comments
+  (`#>` is a PostgreSQL operator), and re-formatting of subqueries.
 - `toString()` runs validation lazily — calling `.parameters` does not throw
   even if the query is invalid. Only `.toString()` / `.query` will throw.
   Statements that are not formatted never throw there.

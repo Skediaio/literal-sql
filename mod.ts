@@ -81,12 +81,13 @@ interface Clause {
 }
 /**
  * Everything the scanner must recognise to know what is quoted, commented
- * or nested: E'...' (backslash escapes), '...', "...", line comment,
+ * or nested: E'...' (backslash escapes), '...', "...", `...` (MySQL,
+ * SQLite), line comment,
  * block-comment opener, dollar-quote opener, `$N`, brackets, CASE and END.
  * An unterminated quote runs to the end of the text.
  */
 const TOKEN =
-  /(?<![\w$])E'(?:[^'\\]|\\[\s\S])*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|\b(?:CASE|END)\b/gi;
+  /(?<![\w$])E'(?:[^'\\]|\\[\s\S])*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|\b(?:CASE|END)\b/gi;
 /**
  * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
  * LEFT/RIGHT/FULL [OUTER], INNER or CROSS, optionally preceded by NATURAL.
@@ -150,6 +151,14 @@ const LIST_CLAUSES = new Set([
 ]);
 /** Clauses that hold a single value: appending replaces it. */
 const SINGLE_CLAUSES = new Set(["from", "limit", "offset", "fetch"]);
+/** How each database writes placeholder N; `?` is positional. */
+const PLACEHOLDERS = {
+  postgres: "$",
+  mysql: "?",
+  sqlite: "?",
+  mssql: "@p",
+  oracle: ":",
+};
 
 /** Finds the tokens of `text`, in order; the text between them is plain. */
 function scan(text: string): Token[] {
@@ -698,6 +707,35 @@ export class SQLQuery {
    */
   get parameters(): unknown[] {
     return [...this.params];
+  }
+  /**
+   * Returns the query and parameters with placeholders written for another
+   * database: postgres `$1`, mysql and sqlite `?`, mssql `@p1`, oracle `:1`.
+   * For `?` the parameters are listed in the order the placeholders occur.
+   *
+   * @param name - The database.
+   * @throws {Error} If `name` is not a known database, or as `toString()`.
+   */
+  dialect(name: keyof typeof PLACEHOLDERS): {
+    query: string;
+    parameters: unknown[];
+  } {
+    if (!Object.hasOwn(PLACEHOLDERS, name)) {
+      throw new Error(
+        `Unknown dialect "${name}": use ${Object.keys(PLACEHOLDERS).join(", ")}`,
+      );
+    }
+    const style = PLACEHOLDERS[name];
+    const positional: unknown[] = [];
+    const query = replaceTokens(this.toString(), "param", (param, before) => {
+      if (style !== "?") return before + style + param.slice(1);
+      positional.push(this.params[Number(param.slice(1)) - 1]);
+      return `${before}?`;
+    });
+    return {
+      query,
+      parameters: style === "?" ? positional : [...this.params],
+    };
   }
   /**
    * Appends a new SQL fragment to the current query, returning a *new* SQLQuery instance.

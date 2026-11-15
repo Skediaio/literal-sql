@@ -191,6 +191,33 @@ report = report.sql`WHERE total > ${min}`.sql`LIMIT ${10}`;
   `INSERT ... ON CONFLICT ... WHERE ... DO UPDATE ... WHERE ...`), `.sql`
   throws instead of guessing.
 
+## Other databases
+
+`.query` uses PostgreSQL `$1, $2` placeholders. `dialect(name)` returns the
+query with placeholders for another database: `"postgres"` (`$1`), `"mysql"`
+and `"sqlite"` (`?`), `"mssql"` (`@p1`) or `"oracle"` (`:1`). For `?` the
+parameters are listed in the order the placeholders occur, which differs from
+`$N` order when a clause was spliced in front of an earlier value:
+
+```ts
+const q = sql`SELECT id, \`name\` FROM users LIMIT ${10}`
+  .sql`WHERE active = ${true}`;
+const { query, parameters } = q.dialect("mysql");
+// SELECT
+//   id,
+//   `name`
+// FROM
+//   users
+// WHERE
+//   active = ?
+// LIMIT ?
+parameters; // [true, 10]
+```
+
+Backtick (`` `name` ``) and bracket (`[name]`) identifiers are understood.
+Not handled: backslash escapes in plain `'...'` strings (MySQL default) and
+MySQL `#` comments; use `--` comments and doubled quotes (`''`).
+
 ## How interpolated values are treated
 
 | You interpolate | It becomes |
