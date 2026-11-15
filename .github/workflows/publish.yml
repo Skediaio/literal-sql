@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 26.x
-          registry-url: https://registry.npmjs.org
           cache: npm
 
       - run: npm ci
@@ -30,6 +29,8 @@ jobs:
       - name: Test
         run: npm test
 
+      # Trusted publishing (OIDC): no NODE_AUTH_TOKEN, no registry-url (setup-node
+      # would set a placeholder token that breaks OIDC). Needs npm >= 11.5.1.
       # Skip when this version is already on npm (every push to main runs this).
       - name: Publish to npm
         run: |
