@@ -7,7 +7,7 @@
  * ON CONFLICT, DO UPDATE SET, CASE expressions etc. all survive intact.
  * Fragments appended with .sql are attached verbatim below the statement.
  *
- * Run: deno run --allow-read examples/dml-showcase.ts
+ * Run: node examples/dml-showcase.ts
  */
 import { sql } from "../mod.ts";
 

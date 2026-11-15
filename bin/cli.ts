@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read
+#!/usr/bin/env node
 
 /**
  * Command line interface for the Literal SQL Query Builder.
@@ -10,50 +10,39 @@
  * @example
  * ```ts
  * // Read query from a file and add conditions
- * deno run --allow-read bin/cli.ts --file query.sql --where "active = true"
+ * node bin/cli.ts --file query.sql --where "active = true"
  *
  * // Build a query from scratch
- * deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --limit 10
+ * node bin/cli.ts --query "SELECT * FROM users" --limit 10
  * ```
  *
  * @module cli
  */
 
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { SQLQuery } from "../mod.ts";
-import { parseArgs } from "jsr:@std/cli@1.0.13/parse-args";
 
 /**
  * Builds an SQL query based on provided arguments
  */
 export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
-  const args = parseArgs(argsList, {
-    string: [
-      "file",
-      "query",
-      "where",
-      "and",
-      "or",
-      "join",
-      "left-join",
-      "right-join",
-      "inner-join",
-      "group-by",
-      "order-by",
-      "limit",
-      "offset",
-    ],
-    boolean: ["help", "no-format"],
-    alias: {
-      f: "file",
-      q: "query",
-      h: "help",
+  const { values: args } = parseArgs({
+    args: argsList,
+    options: {
+      file: { type: "string", short: "f" },
+      query: { type: "string", short: "q" },
+      help: { type: "boolean", short: "h" },
     },
+    // Clause flags (--where, --and, ...) are walked in order below.
+    strict: false,
   });
 
   // Show help if requested or if no file/query provided
   if (args.help || (!args.file && !args.query)) {
     printHelp();
-    Deno.exit(0);
+    process.exit(0);
   }
 
   try {
@@ -61,16 +50,15 @@ export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
     let baseQuery = "";
     if (args.file) {
       try {
-        baseQuery = await Deno.readTextFile(args.file);
+        baseQuery = readFileSync(String(args.file), "utf8");
       } catch (error: unknown) {
-        const errorMessage = error instanceof Error
-          ? error.message
-          : String(error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
         console.error(`Error reading file: ${errorMessage}`);
-        Deno.exit(1);
+        process.exit(1);
       }
     } else if (args.query) {
-      baseQuery = args.query;
+      baseQuery = String(args.query);
     }
 
     // Initialize the SQL query
@@ -78,8 +66,8 @@ export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
     query.parseInitialQuery(baseQuery);
 
     // Apply conditions in the order they were provided on the command line
-    for (let i = 0; i < Deno.args.length; i++) {
-      const arg = Deno.args[i];
+    for (let i = 0; i < argsList.length; i++) {
+      const arg = argsList[i];
 
       // Function to directly append SQL clauses without parameters
       const appendClause = (clause: string, condition: string) => {
@@ -87,28 +75,28 @@ export async function buildQuery(argsList: string[]): Promise<SQLQuery> {
         return query;
       };
 
-      if (arg === "--where" && i + 1 < Deno.args.length) {
-        query = appendClause("WHERE", Deno.args[++i]);
-      } else if (arg === "--and" && i + 1 < Deno.args.length) {
-        query = appendClause("AND", Deno.args[++i]);
-      } else if (arg === "--or" && i + 1 < Deno.args.length) {
-        query = appendClause("OR", Deno.args[++i]);
-      } else if (arg === "--join" && i + 1 < Deno.args.length) {
-        query = appendClause("JOIN", Deno.args[++i]);
-      } else if (arg === "--left-join" && i + 1 < Deno.args.length) {
-        query = appendClause("LEFT JOIN", Deno.args[++i]);
-      } else if (arg === "--right-join" && i + 1 < Deno.args.length) {
-        query = appendClause("RIGHT JOIN", Deno.args[++i]);
-      } else if (arg === "--inner-join" && i + 1 < Deno.args.length) {
-        query = appendClause("INNER JOIN", Deno.args[++i]);
-      } else if (arg === "--group-by" && i + 1 < Deno.args.length) {
-        query = appendClause("GROUP BY", Deno.args[++i]);
-      } else if (arg === "--order-by" && i + 1 < Deno.args.length) {
-        query = appendClause("ORDER BY", Deno.args[++i]);
-      } else if (arg === "--limit" && i + 1 < Deno.args.length) {
-        query = appendClause("LIMIT", Deno.args[++i]);
-      } else if (arg === "--offset" && i + 1 < Deno.args.length) {
-        query = appendClause("OFFSET", Deno.args[++i]);
+      if (arg === "--where" && i + 1 < argsList.length) {
+        query = appendClause("WHERE", argsList[++i]);
+      } else if (arg === "--and" && i + 1 < argsList.length) {
+        query = appendClause("AND", argsList[++i]);
+      } else if (arg === "--or" && i + 1 < argsList.length) {
+        query = appendClause("OR", argsList[++i]);
+      } else if (arg === "--join" && i + 1 < argsList.length) {
+        query = appendClause("JOIN", argsList[++i]);
+      } else if (arg === "--left-join" && i + 1 < argsList.length) {
+        query = appendClause("LEFT JOIN", argsList[++i]);
+      } else if (arg === "--right-join" && i + 1 < argsList.length) {
+        query = appendClause("RIGHT JOIN", argsList[++i]);
+      } else if (arg === "--inner-join" && i + 1 < argsList.length) {
+        query = appendClause("INNER JOIN", argsList[++i]);
+      } else if (arg === "--group-by" && i + 1 < argsList.length) {
+        query = appendClause("GROUP BY", argsList[++i]);
+      } else if (arg === "--order-by" && i + 1 < argsList.length) {
+        query = appendClause("ORDER BY", argsList[++i]);
+      } else if (arg === "--limit" && i + 1 < argsList.length) {
+        query = appendClause("LIMIT", argsList[++i]);
+      } else if (arg === "--offset" && i + 1 < argsList.length) {
+        query = appendClause("OFFSET", argsList[++i]);
       }
     }
 
@@ -126,7 +114,7 @@ function printHelp() {
 Literal SQL CLI - SQL Query Builder
 
 USAGE:
-  deno run --allow-read bin/cli.ts [OPTIONS]
+  literal-sql [OPTIONS]
 
 OPTIONS:
   -f, --file FILE       Read base SQL query from FILE
@@ -147,10 +135,10 @@ OPTIONS:
 
 EXAMPLES:
   # Read query from a file and add conditions
-  deno run --allow-read bin/cli.ts --file query.sql --where "active = true" --and "created_at > '2023-01-01'"
+  literal-sql --file query.sql --where "active = true" --and "created_at > '2023-01-01'"
 
   # Build a query from scratch
-  deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
+  literal-sql --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
   `);
 }
 
@@ -159,7 +147,7 @@ EXAMPLES:
  */
 async function main() {
   try {
-    const query = await buildQuery(Deno.args);
+    const query = await buildQuery(process.argv.slice(2));
 
     // Output the query
     console.log(query.toString());
@@ -172,10 +160,14 @@ async function main() {
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`Error: ${errorMessage}`);
-    Deno.exit(1);
+    process.exit(1);
   }
 }
 
-if (import.meta.main) {
+// Run only when executed directly (also via the npm bin symlink), not on import.
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   await main();
 }

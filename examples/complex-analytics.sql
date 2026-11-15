@@ -1,6 +1,6 @@
 -- Complex analytics query for CLI testing.
 -- Feed to the CLI via:
---   deno task cli --file examples/complex-analytics.sql \
+--   npm run cli -- --file examples/complex-analytics.sql \
 --     --where "o.total_amount > 1000" \
 --     --and "o.status = 'paid'" \
 --     --order-by "total_amount DESC" \

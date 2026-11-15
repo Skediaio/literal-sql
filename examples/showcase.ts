@@ -7,7 +7,7 @@
  * LIKE, GROUP BY, ORDER BY with directions, LIMIT/OFFSET, and parameters
  * throughout.
  *
- * Run: deno run --allow-read examples/showcase.ts
+ * Run: node examples/showcase.ts
  */
 import { sql } from "../mod.ts";
 

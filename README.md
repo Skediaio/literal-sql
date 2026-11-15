@@ -76,7 +76,7 @@ identifier-vs-fragment-vs-helper decision tree. For anything that isn't a
 value, you write the SQL and chain it with `.sql`:
 
 ```ts
-import { sql } from "jsr:@skedia/literal-sql";
+import { sql } from "@skedia/literal-sql";
 
 let query = sql`SELECT id, name, email FROM users WHERE 1=1`;
 
@@ -241,17 +241,12 @@ filtered.toString(); // "SELECT * FROM users WHERE active = $1"
 
 ## Installation
 
-### Deno
-
-```ts
-import { sql } from "jsr:@skedia/literal-sql";
-```
-
-### Node.js / Bun
-
 ```sh
-npx jsr add @skedia/literal-sql
+npm install @skedia/literal-sql
 ```
+
+Requires Node.js 22.18+ (also works with Bun). The package is also published
+on JSR (`npx jsr add @skedia/literal-sql`, or `jsr:@skedia/literal-sql` in Deno).
 
 ## Command Line Interface
 
@@ -262,14 +257,14 @@ conditions or clauses for testing purposes.
 ### Running the CLI
 
 ```sh
-# Using deno task
-deno task cli --query "SELECT * FROM users" --where "active = true" --limit 10
+# Without installing
+npx @skedia/literal-sql --query "SELECT * FROM users" --where "active = true" --limit 10
 
-# Direct execution
-deno run --allow-read jsr:@skedia/literal-sql/cli --query "SELECT * FROM users" --where "active = true"
+# Installed in a project
+npx literal-sql --help
 
-# From a local installation
-deno run --allow-read bin/cli.ts --help
+# From a checkout of this repo
+npm run cli -- --query "SELECT * FROM users" --where "active = true"
 ```
 
 ### CLI Options
@@ -297,13 +292,13 @@ OPTIONS:
 Build a query from a file:
 
 ```sh
-deno run --allow-read bin/cli.ts --file query.sql --where "active = true" --and "created_at > '2023-01-01'"
+literal-sql --file query.sql --where "active = true" --and "created_at > '2023-01-01'"
 ```
 
 Build a query from scratch:
 
 ```sh
-deno run --allow-read bin/cli.ts --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
+literal-sql --query "SELECT * FROM users" --where "id > 100" --order-by "created_at DESC" --limit 10
 ```
 
 ## License

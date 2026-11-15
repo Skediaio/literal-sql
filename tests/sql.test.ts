@@ -10,12 +10,14 @@
  * (comments stripped, ${} values lifted to $N parameters) and never reformatted.
  * Multi-line expected strings are written as arrays joined by '\n' for readability.
  */
-import { sql, type SQLQuery } from "../mod.ts"; // Assuming SQLQuery is exported if needed directly
-import { assertEquals, assertThrows } from "jsr:@std/assert";
+
+import { deepStrictEqual as assertEquals, throws } from "node:assert/strict";
+import { test } from "node:test";
+import { type SQLQuery, sql } from "../mod.ts"; // Assuming SQLQuery is exported if needed directly
 
 // --- Basic SELECT Tests ---
 
-Deno.test("Basic SELECT query", () => {
+test("Basic SELECT query", () => {
   const query = sql`SELECT * FROM users`;
   // Expected format based on toString() output.
   const expected = ["SELECT", "  *", "FROM", "  users"].join("\n");
@@ -23,7 +25,7 @@ Deno.test("Basic SELECT query", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("SELECT with fields", () => {
+test("SELECT with fields", () => {
   const query = sql`SELECT id, name, email FROM users`;
   const expected = [
     "SELECT",
@@ -37,7 +39,7 @@ Deno.test("SELECT with fields", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("SELECT with fields on multiple lines", () => {
+test("SELECT with fields on multiple lines", () => {
   const query = sql`
   SELECT
     id,
@@ -59,9 +61,8 @@ Deno.test("SELECT with fields on multiple lines", () => {
 
 // --- JOIN Tests ---
 
-Deno.test("SELECT with JOIN", () => {
-  const query =
-    sql`SELECT * FROM users JOIN orders ON users.id = orders.user_id`;
+test("SELECT with JOIN", () => {
+  const query = sql`SELECT * FROM users JOIN orders ON users.id = orders.user_id`;
   // Expected format: JOIN keyword on new line, condition indented.
   const expected = [
     "SELECT",
@@ -75,7 +76,7 @@ Deno.test("SELECT with JOIN", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("SELECT with multiple JOINs", () => {
+test("SELECT with multiple JOINs", () => {
   const query = sql`
   SELECT *
   FROM users
@@ -96,7 +97,7 @@ Deno.test("SELECT with multiple JOINs", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding a JOIN with sql method", () => {
+test("Adding a JOIN with sql method", () => {
   const query = sql`SELECT * FROM users`;
   const newQuery = query.sql`JOIN orders ON users.id = orders.user_id`;
   // Expected format: Incremental add keeps JOIN keyword separate. Condition indented.
@@ -116,7 +117,7 @@ Deno.test("Adding a JOIN with sql method", () => {
   assertEquals(query.toString(), expectedOriginal);
 });
 
-Deno.test("JOIN with AND conditions in ON clause", () => {
+test("JOIN with AND conditions in ON clause", () => {
   // Test JOIN clauses with multiple AND conditions in ON
   const query = sql`
   SELECT *
@@ -141,7 +142,7 @@ Deno.test("JOIN with AND conditions in ON clause", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Table aliases in FROM and JOIN", () => {
+test("Table aliases in FROM and JOIN", () => {
   const query = sql`
   SELECT u.id, o.order_date
   FROM users u
@@ -159,7 +160,7 @@ Deno.test("Table aliases in FROM and JOIN", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Complex JOIN with AND/OR combinations in ON clause", () => {
+test("Complex JOIN with AND/OR combinations in ON clause", () => {
   const query = sql`
   SELECT u.name, p.title
   FROM users u
@@ -184,7 +185,7 @@ Deno.test("Complex JOIN with AND/OR combinations in ON clause", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding multiple JOINs with sql method", () => {
+test("Adding multiple JOINs with sql method", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`JOIN orders ON users.id = orders.user_id`;
   query = query.sql`LEFT JOIN products ON orders.product_id = products.id`;
@@ -205,7 +206,7 @@ Deno.test("Adding multiple JOINs with sql method", () => {
 
 // --- WHERE Tests ---
 
-Deno.test("SELECT with WHERE", () => {
+test("SELECT with WHERE", () => {
   const query = sql`SELECT * FROM users WHERE id = 1`;
   // Expected format: WHERE on new line, condition indented.
   const expected = [
@@ -220,7 +221,7 @@ Deno.test("SELECT with WHERE", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding a WHERE with sql method", () => {
+test("Adding a WHERE with sql method", () => {
   const query = sql`SELECT * FROM users`;
   const newQuery = query.sql`WHERE id = 1`;
   // Expected format: WHERE added incrementally.
@@ -236,7 +237,7 @@ Deno.test("Adding a WHERE with sql method", () => {
   assertEquals(newQuery.parameters, []);
 });
 
-Deno.test("Adding multiple WHERE conditions with AND", () => {
+test("Adding multiple WHERE conditions with AND", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = 1`;
   query = query.sql`AND name = 'John'`;
@@ -255,7 +256,7 @@ Deno.test("Adding multiple WHERE conditions with AND", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding multiple WHERE conditions with OR", () => {
+test("Adding multiple WHERE conditions with OR", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = 1`;
   query = query.sql`OR name = 'John'`;
@@ -274,34 +275,30 @@ Deno.test("Adding multiple WHERE conditions with OR", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test(
-  "Adding WHERE conditions without explicit operator (defaults to AND)",
-  () => {
-    let query = sql`SELECT * FROM users`;
-    query = query.sql`WHERE id = 1`;
-    // This fragment doesn't start with AND/OR, parseQuery assumes AND
-    query = query.sql`name = 'John'`;
-    // Expected format: Default AND on new line, condition indented.
-    const expected = [
-      "SELECT",
-      "  *",
-      "FROM",
-      "  users",
-      "WHERE",
-      "  id = 1",
-      "AND", // Defaulted to AND on new line
-      "  name = 'John'", // Condition indented
-    ].join("\n");
-    assertEquals(query.toString(), expected);
-    assertEquals(query.parameters, []);
-  },
-);
+test("Adding WHERE conditions without explicit operator (defaults to AND)", () => {
+  let query = sql`SELECT * FROM users`;
+  query = query.sql`WHERE id = 1`;
+  // This fragment doesn't start with AND/OR, parseQuery assumes AND
+  query = query.sql`name = 'John'`;
+  // Expected format: Default AND on new line, condition indented.
+  const expected = [
+    "SELECT",
+    "  *",
+    "FROM",
+    "  users",
+    "WHERE",
+    "  id = 1",
+    "AND", // Defaulted to AND on new line
+    "  name = 'John'", // Condition indented
+  ].join("\n");
+  assertEquals(query.toString(), expected);
+  assertEquals(query.parameters, []);
+});
 
-Deno.test("WHERE clause with parentheses", () => {
+test("WHERE clause with parentheses", () => {
   const status = "active";
   const type = "admin";
-  const query =
-    sql`SELECT * FROM users WHERE status = ${status} AND (type = ${type} OR is_superuser = true)`;
+  const query = sql`SELECT * FROM users WHERE status = ${status} AND (type = ${type} OR is_superuser = true)`;
   const expected = [
     "SELECT",
     "  *",
@@ -318,7 +315,7 @@ Deno.test("WHERE clause with parentheses", () => {
 
 // --- GROUP BY Tests ---
 
-Deno.test("SELECT with GROUP BY", () => {
+test("SELECT with GROUP BY", () => {
   const query = sql`SELECT department, count(*) FROM users GROUP BY department`;
   // Expected format: GROUP BY on new line, terms indented on subsequent lines.
   const expected = [
@@ -334,7 +331,7 @@ Deno.test("SELECT with GROUP BY", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding GROUP BY with sql method", () => {
+test("Adding GROUP BY with sql method", () => {
   const query = sql`SELECT count(*) FROM users`;
   const newQuery = query.sql`GROUP BY department`;
   // Expected format: GROUP BY added incrementally.
@@ -350,9 +347,8 @@ Deno.test("Adding GROUP BY with sql method", () => {
   assertEquals(newQuery.parameters, []);
 });
 
-Deno.test("Multiple GROUP BY fields", () => {
-  const query =
-    sql`SELECT department, role, count(*) FROM users GROUP BY department, role`;
+test("Multiple GROUP BY fields", () => {
+  const query = sql`SELECT department, role, count(*) FROM users GROUP BY department, role`;
   // Expected format: GROUP BY on new line, each term indented on subsequent lines, comma-terminated.
   const expected = [
     "SELECT",
@@ -371,7 +367,7 @@ Deno.test("Multiple GROUP BY fields", () => {
 
 // --- ORDER BY Tests ---
 
-Deno.test("SELECT with ORDER BY", () => {
+test("SELECT with ORDER BY", () => {
   const query = sql`SELECT * FROM users ORDER BY name`;
   // Expected format: ORDER BY on new line, term indented.
   const expected = [
@@ -386,7 +382,7 @@ Deno.test("SELECT with ORDER BY", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding ORDER BY with sql method", () => {
+test("Adding ORDER BY with sql method", () => {
   const query = sql`SELECT * FROM users`;
   const newQuery = query.sql`ORDER BY name`;
   // Expected format: ORDER BY added incrementally.
@@ -402,7 +398,7 @@ Deno.test("Adding ORDER BY with sql method", () => {
   assertEquals(newQuery.parameters, []);
 });
 
-Deno.test("ORDER BY with direction", () => {
+test("ORDER BY with direction", () => {
   const query = sql`SELECT * FROM users ORDER BY name DESC`;
   // Expected format: ORDER BY on new line, term with direction indented.
   const expected = [
@@ -417,7 +413,7 @@ Deno.test("ORDER BY with direction", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Multiple ORDER BY fields", () => {
+test("Multiple ORDER BY fields", () => {
   const query = sql`SELECT * FROM users ORDER BY department ASC, name DESC`;
   // Expected format: ORDER BY on new line, each term indented on subsequent lines, comma-terminated.
   const expected = [
@@ -435,7 +431,7 @@ Deno.test("Multiple ORDER BY fields", () => {
 
 // --- LIMIT and OFFSET Tests ---
 
-Deno.test("SELECT with LIMIT", () => {
+test("SELECT with LIMIT", () => {
   const query = sql`SELECT * FROM users LIMIT 10`;
   // Expected format: LIMIT remains on single line.
   const expected = ["SELECT", "  *", "FROM", "  users", "LIMIT 10"].join("\n");
@@ -443,7 +439,7 @@ Deno.test("SELECT with LIMIT", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding LIMIT with sql method", () => {
+test("Adding LIMIT with sql method", () => {
   const query = sql`SELECT * FROM users`;
   const newQuery = query.sql`LIMIT 10`;
   // Expected format: LIMIT added, remains on single line.
@@ -452,7 +448,7 @@ Deno.test("Adding LIMIT with sql method", () => {
   assertEquals(newQuery.parameters, []);
 });
 
-Deno.test("SELECT with OFFSET", () => {
+test("SELECT with OFFSET", () => {
   const query = sql`SELECT * FROM users OFFSET 20`;
   // Expected format: OFFSET remains on single line.
   const expected = ["SELECT", "  *", "FROM", "  users", "OFFSET 20"].join("\n");
@@ -460,7 +456,7 @@ Deno.test("SELECT with OFFSET", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Adding OFFSET with sql method", () => {
+test("Adding OFFSET with sql method", () => {
   const query = sql`SELECT * FROM users`;
   const newQuery = query.sql`OFFSET 20`;
   // Expected format: OFFSET added, remains on single line.
@@ -469,7 +465,7 @@ Deno.test("Adding OFFSET with sql method", () => {
   assertEquals(newQuery.parameters, []);
 });
 
-Deno.test("LIMIT and OFFSET together (added incrementally)", () => {
+test("LIMIT and OFFSET together (added incrementally)", () => {
   let query = sql`SELECT * FROM users`;
   query = query.sql`LIMIT 10`;
   query = query.sql`OFFSET 20`;
@@ -486,7 +482,7 @@ Deno.test("LIMIT and OFFSET together (added incrementally)", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("LIMIT and OFFSET together (initial query)", () => {
+test("LIMIT and OFFSET together (initial query)", () => {
   const query = sql`SELECT * FROM users LIMIT 10 OFFSET 20`;
   // Expected format: Each clause on its own line when present initially.
   const expected = [
@@ -503,7 +499,7 @@ Deno.test("LIMIT and OFFSET together (initial query)", () => {
 
 // --- Parameter Tests ---
 
-Deno.test("Parameters in WHERE clause", () => {
+test("Parameters in WHERE clause", () => {
   const id = 1;
   const query = sql`SELECT * FROM users WHERE id = ${id}`;
   // Expected format: WHERE formatted, parameter placeholder used.
@@ -519,7 +515,7 @@ Deno.test("Parameters in WHERE clause", () => {
   assertEquals(query.parameters, [1]);
 });
 
-Deno.test("Multiple parameters in WHERE clause", () => {
+test("Multiple parameters in WHERE clause", () => {
   const id = 1;
   const name = "John";
   const query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name}`;
@@ -538,7 +534,7 @@ Deno.test("Multiple parameters in WHERE clause", () => {
   assertEquals(query.parameters, [1, "John"]);
 });
 
-Deno.test("Parameters added with sql method", () => {
+test("Parameters added with sql method", () => {
   const id = 1;
   let query = sql`SELECT * FROM users`;
   query = query.sql`WHERE id = ${id}`;
@@ -555,7 +551,7 @@ Deno.test("Parameters added with sql method", () => {
   assertEquals(query.parameters, [1]);
 });
 
-Deno.test("Multiple parameters across multiple sql calls", () => {
+test("Multiple parameters across multiple sql calls", () => {
   const id = 1;
   const name = "John";
   let query = sql`SELECT * FROM users`;
@@ -576,7 +572,7 @@ Deno.test("Multiple parameters across multiple sql calls", () => {
   assertEquals(query.parameters, [1, "John"]);
 });
 
-Deno.test("Parameter in LIMIT clause", () => {
+test("Parameter in LIMIT clause", () => {
   const limit = 10;
   const query = sql`SELECT * FROM users LIMIT ${limit}`;
   const expected = [
@@ -590,7 +586,7 @@ Deno.test("Parameter in LIMIT clause", () => {
   assertEquals(query.parameters, [limit]);
 });
 
-Deno.test("Parameter in OFFSET clause", () => {
+test("Parameter in OFFSET clause", () => {
   const offset = 20;
   const query = sql`SELECT * FROM users OFFSET ${offset}`;
   const expected = [
@@ -604,7 +600,7 @@ Deno.test("Parameter in OFFSET clause", () => {
   assertEquals(query.parameters, [offset]);
 });
 
-Deno.test("Parameters in LIMIT and OFFSET clauses", () => {
+test("Parameters in LIMIT and OFFSET clauses", () => {
   const limit = 10;
   const offset = 20;
   const query = sql`SELECT * FROM users LIMIT ${limit} OFFSET ${offset}`;
@@ -620,10 +616,9 @@ Deno.test("Parameters in LIMIT and OFFSET clauses", () => {
   assertEquals(query.parameters, [limit, offset]);
 });
 
-Deno.test("Parameter in JOIN ON clause", () => {
+test("Parameter in JOIN ON clause", () => {
   const minOrderId = 100;
-  const query =
-    sql`SELECT u.name, o.id FROM users u JOIN orders o ON u.id = o.user_id AND o.id > ${minOrderId}`;
+  const query = sql`SELECT u.name, o.id FROM users u JOIN orders o ON u.id = o.user_id AND o.id > ${minOrderId}`;
   // Expected format: JOIN formatted with AND on new line in ON clause.
   const expected = [
     "SELECT",
@@ -639,11 +634,10 @@ Deno.test("Parameter in JOIN ON clause", () => {
   assertEquals(query.parameters, [minOrderId]);
 });
 
-Deno.test("Parameter in SELECT clause", () => {
+test("Parameter in SELECT clause", () => {
   const bonus = 100;
   // Note: Parameters in SELECT are less common but should work
-  const query =
-    sql`SELECT name, salary + ${bonus} as total_comp FROM employees`;
+  const query = sql`SELECT name, salary + ${bonus} as total_comp FROM employees`;
   // Expected format: SELECT fields formatted.
   const expected = [
     "SELECT",
@@ -656,12 +650,11 @@ Deno.test("Parameter in SELECT clause", () => {
   assertEquals(query.parameters, [bonus]);
 });
 
-Deno.test("Skip undefined values (replaced with NULL literal)", () => {
+test("Skip undefined values (replaced with NULL literal)", () => {
   const id = 1;
   const name = undefined; // This should become NULL in the query string, not a parameter
   const status = "active";
-  const query =
-    sql`SELECT * FROM users WHERE id = ${id} AND name = ${name} AND status = ${status}`;
+  const query = sql`SELECT * FROM users WHERE id = ${id} AND name = ${name} AND status = ${status}`;
   // Expected format: WHERE formatted, undefined becomes NULL, ANDs on new lines.
   const expected = [
     "SELECT",
@@ -679,11 +672,10 @@ Deno.test("Skip undefined values (replaced with NULL literal)", () => {
   assertEquals(query.parameters, [id, status]); // Only id and status are parameters
 });
 
-Deno.test("Handle null values (passed as parameters)", () => {
+test("Handle null values (passed as parameters)", () => {
   const id = 1;
   const name = null; // This should become parameter $2 with value null
-  const query =
-    sql`SELECT * FROM users WHERE id = ${id} AND manager_id = ${name}`;
+  const query = sql`SELECT * FROM users WHERE id = ${id} AND manager_id = ${name}`;
   // Expected format: WHERE formatted, null becomes parameter $2.
   const expected = [
     "SELECT",
@@ -701,7 +693,7 @@ Deno.test("Handle null values (passed as parameters)", () => {
 
 // --- Complex Query Tests ---
 
-Deno.test("Complex query with multiple clauses built incrementally", () => {
+test("Complex query with multiple clauses built incrementally", () => {
   const name = "John";
   const limit = 10;
   const offset = 5;
@@ -754,7 +746,7 @@ Deno.test("Complex query with multiple clauses built incrementally", () => {
   assertEquals(query.parameters, ["%John%", minDate, limit, offset]);
 });
 
-Deno.test("Building query conditionally", () => {
+test("Building query conditionally", () => {
   const filters = {
     hasName: true,
     name: "John",
@@ -847,7 +839,7 @@ Deno.test("Building query conditionally", () => {
 
 // --- Edge Case Tests ---
 
-Deno.test("Empty initial query", () => {
+test("Empty initial query", () => {
   // What happens if we start with an empty template?
   const query = sql``;
   // Should default to SELECT * as no SELECT clause was provided.
@@ -857,7 +849,7 @@ Deno.test("Empty initial query", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Initial query with only parameters (likely invalid SQL)", () => {
+test("Initial query with only parameters (likely invalid SQL)", () => {
   const val1 = 1;
   const val2 = "test";
   // How does the parser handle this? It might try to parse $1 as a clause.
@@ -873,7 +865,7 @@ Deno.test("Initial query with only parameters (likely invalid SQL)", () => {
   assertEquals(query.parameters, [val1, val2]);
 });
 
-Deno.test("SELECT with leading commas (should be cleaned)", () => {
+test("SELECT with leading commas (should be cleaned)", () => {
   const query = sql`
   SELECT
     , id
@@ -894,7 +886,7 @@ Deno.test("SELECT with leading commas (should be cleaned)", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("SELECT with trailing commas (should be cleaned)", () => {
+test("SELECT with trailing commas (should be cleaned)", () => {
   const query = sql`
   SELECT
     id,
@@ -915,7 +907,7 @@ Deno.test("SELECT with trailing commas (should be cleaned)", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("Query immutability check", () => {
+test("Query immutability check", () => {
   const id = 1;
   const query1 = sql`SELECT * FROM users`;
   const query2 = query1.sql`WHERE id = ${id}`;
@@ -957,7 +949,7 @@ Deno.test("Query immutability check", () => {
   assertEquals(query2.parameters, [id]);
 });
 
-Deno.test("Complex nested SQL functions formatting", () => {
+test("Complex nested SQL functions formatting", () => {
   // Test expecting highly structured, recursive formatting for functions.
   const date = "2025-05-12";
   const query = sql`
@@ -1045,7 +1037,7 @@ Deno.test("Complex nested SQL functions formatting", () => {
 
 // --- Async Usage Pattern Test ---
 
-Deno.test("Async usage pattern", async () => {
+test("Async usage pattern", async () => {
   // Simulate async data fetching
   const fetchUser = async (id: number) => {
     await new Promise((resolve) => setTimeout(resolve, 10)); // Simulate delay
@@ -1080,13 +1072,12 @@ Deno.test("Async usage pattern", async () => {
 // ${} values lifted to $N parameters. Fragments appended via .sql are
 // attached verbatim below the statement.
 
-Deno.test("INSERT passes through raw with parameters lifted", () => {
+test("INSERT passes through raw with parameters lifted", () => {
   const registrationId = 123;
   const date = "2025-03-01";
   const userId = 456;
 
-  const query =
-    sql`INSERT INTO attendances (registration_id, date, checked_in_at, checked_in_by)
+  const query = sql`INSERT INTO attendances (registration_id, date, checked_in_at, checked_in_by)
 VALUES (${registrationId}, ${date}, CURRENT_TIMESTAMP, ${userId})
 RETURNING *`;
 
@@ -1100,13 +1091,12 @@ RETURNING *`;
   assertEquals(query.parameters, [registrationId, date, userId]);
 });
 
-Deno.test("INSERT with ON CONFLICT DO UPDATE passes through raw", () => {
+test("INSERT with ON CONFLICT DO UPDATE passes through raw", () => {
   const registrationId = 123;
   const date = "2025-03-01";
   const session = { userId: 456 };
 
-  const query =
-    sql`INSERT INTO attendances (registration_id, date, checked_in_at, checked_in_by)
+  const query = sql`INSERT INTO attendances (registration_id, date, checked_in_at, checked_in_by)
 VALUES (${registrationId}, ${date}, CURRENT_TIMESTAMP, ${session.userId})
 ON CONFLICT (registration_id, date)
 DO UPDATE SET checked_in_by = ${session.userId}
@@ -1132,7 +1122,7 @@ RETURNING *`;
   ]);
 });
 
-Deno.test("UPDATE passes through raw with parameters lifted", () => {
+test("UPDATE passes through raw with parameters lifted", () => {
   const userId = 123;
   const email = "test@example.com";
 
@@ -1152,7 +1142,7 @@ RETURNING id, email`;
   assertEquals(query.parameters, [email, userId]);
 });
 
-Deno.test("UPDATE with multi-line SET and complex WHERE passes through raw", () => {
+test("UPDATE with multi-line SET and complex WHERE passes through raw", () => {
   const userId = 123;
   const email = "test@example.com";
   const firstName = "UpdatedFirstName";
@@ -1190,7 +1180,7 @@ RETURNING id, email, first_name, is_active`;
   assertEquals(query.parameters, [email, firstName, isActive, userId]);
 });
 
-Deno.test("DELETE passes through raw", () => {
+test("DELETE passes through raw", () => {
   const userId = 123;
 
   const query = sql`DELETE FROM users WHERE id = ${userId} RETURNING id`;
@@ -1202,7 +1192,7 @@ Deno.test("DELETE passes through raw", () => {
   assertEquals(query.parameters, [userId]);
 });
 
-Deno.test("Appending fragments to a DML query attaches them verbatim", () => {
+test("Appending fragments to a DML query attaches them verbatim", () => {
   const userId = 123;
   const cutoff = "2025-01-01";
 
@@ -1221,7 +1211,7 @@ Deno.test("Appending fragments to a DML query attaches them verbatim", () => {
   assertEquals(query.parameters, [userId, cutoff]);
 });
 
-Deno.test("DELETE with BETWEEN and mixed AND/OR passes through raw", () => {
+test("DELETE with BETWEEN and mixed AND/OR passes through raw", () => {
   const startDate = "2024-01-01";
   const endDate = "2024-12-31";
   const minAge = 18;
@@ -1249,31 +1239,34 @@ RETURNING registration_id, attendee_email, created_at, status`;
   assertEquals(query.parameters, [startDate, endDate, minAge, city]);
 });
 
-Deno.test("Throws error for SELECT with RETURNING", () => {
+test("Throws error for SELECT with RETURNING", () => {
   const queryFn = () => sql`SELECT * FROM users RETURNING id`;
-  assertThrows(
-    () => queryFn().toString(), // Trigger the validation in toString()
-    Error,
-    "RETURNING clause cannot be used with SELECT statements", // Check specific message if desired
+  throws(
+    () => queryFn().toString(),
+    {
+      name: "Error",
+      message: /RETURNING clause cannot be used with SELECT statements/,
+    },
     "Should throw error when SELECT and RETURNING are combined",
   );
 
   // Also test if RETURNING is added later
   const query2 = sql`SELECT * FROM users`;
   const queryFn2 = () => query2.sql`RETURNING id`;
-  assertThrows(
+  throws(
     () => queryFn2().toString(),
-    Error,
-    "RETURNING clause cannot be used with SELECT statements",
+    {
+      name: "Error",
+      message: /RETURNING clause cannot be used with SELECT statements/,
+    },
     "Should throw error when RETURNING is added to SELECT",
   );
 });
 
 // --- String-literal / comment / window-function / CROSS JOIN / passthrough tests ---
 
-Deno.test("String literal containing AND/OR is not mis-split", () => {
-  const query =
-    sql`SELECT * FROM users WHERE company = 'Brand AND Sons' OR notes = 'x OR y'`;
+test("String literal containing AND/OR is not mis-split", () => {
+  const query = sql`SELECT * FROM users WHERE company = 'Brand AND Sons' OR notes = 'x OR y'`;
   const expected = [
     "SELECT",
     "  *",
@@ -1288,7 +1281,7 @@ Deno.test("String literal containing AND/OR is not mis-split", () => {
   assertEquals(query.parameters, []);
 });
 
-Deno.test("'--' inside string literal is preserved", () => {
+test("'--' inside string literal is preserved", () => {
   const query = sql`SELECT * FROM users WHERE name = 'a--b'`;
   const expected = [
     "SELECT",
@@ -1301,7 +1294,7 @@ Deno.test("'--' inside string literal is preserved", () => {
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("Real line comment stripped; '--' inside literal preserved", () => {
+test("Real line comment stripped; '--' inside literal preserved", () => {
   const commented = sql`SELECT * FROM users WHERE x = 1 -- real comment`;
   const expectedComment = [
     "SELECT",
@@ -1327,9 +1320,8 @@ Deno.test("Real line comment stripped; '--' inside literal preserved", () => {
   assertEquals(literal.toString(), expectedLiteral);
 });
 
-Deno.test("Window function with OVER clause preserved", () => {
-  const query =
-    sql`SELECT ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM employees`;
+test("Window function with OVER clause preserved", () => {
+  const query = sql`SELECT ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn FROM employees`;
   const expected = [
     "SELECT",
     "  ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn",
@@ -1339,21 +1331,14 @@ Deno.test("Window function with OVER clause preserved", () => {
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("Comma inside string literal in SELECT list not mis-split", () => {
+test("Comma inside string literal in SELECT list not mis-split", () => {
   const query = sql`SELECT 'a,b', c FROM t`;
-  const expected = [
-    "SELECT",
-    "  'a,b',",
-    "  c",
-    "FROM",
-    "  t",
-  ].join("\n");
+  const expected = ["SELECT", "  'a,b',", "  c", "FROM", "  t"].join("\n");
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("CROSS JOIN recognised as JOIN clause in initial query", () => {
-  const query =
-    sql`SELECT u.name FROM users u CROSS JOIN decks d WHERE u.active = true`;
+test("CROSS JOIN recognised as JOIN clause in initial query", () => {
+  const query = sql`SELECT u.name FROM users u CROSS JOIN decks d WHERE u.active = true`;
   const expected = [
     "SELECT",
     "  u.name",
@@ -1367,7 +1352,7 @@ Deno.test("CROSS JOIN recognised as JOIN clause in initial query", () => {
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("CROSS JOIN appended via .sql() method", () => {
+test("CROSS JOIN appended via .sql() method", () => {
   const query = sql`SELECT u.name FROM users u`.sql`CROSS JOIN decks d`;
   const expected = [
     "SELECT",
@@ -1380,16 +1365,15 @@ Deno.test("CROSS JOIN appended via .sql() method", () => {
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("CTE / WITH query passes through raw", () => {
-  const cte =
-    sql`WITH active_users AS (SELECT id FROM users WHERE active = true) SELECT * FROM active_users`;
+test("CTE / WITH query passes through raw", () => {
+  const cte = sql`WITH active_users AS (SELECT id FROM users WHERE active = true) SELECT * FROM active_users`;
   assertEquals(
     cte.toString(),
     "WITH active_users AS (SELECT id FROM users WHERE active = true) SELECT * FROM active_users",
   );
 });
 
-Deno.test("UNION query passes through raw", () => {
+test("UNION query passes through raw", () => {
   const union = sql`SELECT id FROM customers UNION SELECT id FROM vendors`;
   assertEquals(
     union.toString(),
@@ -1403,7 +1387,7 @@ Deno.test("UNION query passes through raw", () => {
 // These tests empirically lock in that values can never leak into the SQL
 // string, regardless of what they contain.
 
-Deno.test("Classic SQL injection string becomes a parameter, not concatenated", () => {
+test("Classic SQL injection string becomes a parameter, not concatenated", () => {
   const malicious = "'; DROP TABLE users; --";
   const query = sql`SELECT * FROM users WHERE name = ${malicious}`;
   const expected = [
@@ -1419,7 +1403,7 @@ Deno.test("Classic SQL injection string becomes a parameter, not concatenated", 
   assertEquals(query.parameters, [malicious]);
 });
 
-Deno.test("Value containing SQL syntax is not interpreted", () => {
+test("Value containing SQL syntax is not interpreted", () => {
   const tricky = "OR 1=1; --";
   const query = sql`SELECT id FROM users WHERE token = ${tricky}`;
   const expected = [
@@ -1434,33 +1418,27 @@ Deno.test("Value containing SQL syntax is not interpreted", () => {
   assertEquals(query.parameters, [tricky]);
 });
 
-Deno.test("Value containing the internal mask delimiter does not corrupt the mask", () => {
+test("Value containing the internal mask delimiter does not corrupt the mask", () => {
   // The maskStringLiterals helper uses \uE000S<n>\uE000 as a placeholder
   // delimiter. A user value containing that sequence cannot corrupt the mask
   // because values never enter the mask layer — they are extracted into params
   // by _interpolate before any masking runs.
   const weird = "\uE000S0\uE000";
   const query = sql`SELECT * FROM t WHERE x = ${weird}`;
-  const expected = [
-    "SELECT",
-    "  *",
-    "FROM",
-    "  t",
-    "WHERE",
-    "  x = $1",
-  ].join("\n");
+  const expected = ["SELECT", "  *", "FROM", "  t", "WHERE", "  x = $1"].join(
+    "\n",
+  );
   assertEquals(query.toString(), expected);
   assertEquals(query.parameters, [weird]);
 });
 
-Deno.test("Value containing a $N literal is not re-interpreted as a placeholder", () => {
+test("Value containing a $N literal is not re-interpreted as a placeholder", () => {
   // The string "cost is $1" is data, not a placeholder reference. Combined with
   // a real parameter, it proves parameter numbering is independent of value
   // contents.
   const id = 5;
   const label = "cost is $1";
-  const query =
-    sql`SELECT * FROM products WHERE id = ${id} AND label = ${label}`;
+  const query = sql`SELECT * FROM products WHERE id = ${id} AND label = ${label}`;
   const expected = [
     "SELECT",
     "  *",
@@ -1475,7 +1453,7 @@ Deno.test("Value containing a $N literal is not re-interpreted as a placeholder"
   assertEquals(query.parameters, [id, label]);
 });
 
-Deno.test("Identifier passed as a value fails closed (not injection)", () => {
+test("Identifier passed as a value fails closed (not injection)", () => {
   // Postgres does not allow parameterised identifiers. Passing a column name
   // as a value produces `SELECT $1 FROM users`, which the database will reject
   // at execution time. This is fail-closed behaviour (clear error), not an
@@ -1493,7 +1471,7 @@ Deno.test("Identifier passed as a value fails closed (not injection)", () => {
 // so a shifted $N could collide with a not-yet-shifted one
 // (e.g. `x = $1 AND c = $3 AND d = $3` with three parameters).
 
-Deno.test("Nested fragment after an existing parameter renumbers correctly", () => {
+test("Nested fragment after an existing parameter renumbers correctly", () => {
   const frag = sql`b = ${"B"} AND c = ${"C"}`;
   const query = sql`SELECT * FROM t WHERE a = ${"A"} AND ${frag}`;
   const expected = [
@@ -1512,7 +1490,7 @@ Deno.test("Nested fragment after an existing parameter renumbers correctly", () 
   assertEquals(query.parameters, ["A", "B", "C"]);
 });
 
-Deno.test("Nested fragment appended via .sql renumbers correctly", () => {
+test("Nested fragment appended via .sql renumbers correctly", () => {
   const frag = sql`c = ${"C"} AND d = ${"D"}`;
   let query = sql`SELECT * FROM t WHERE x = ${"X"}`;
   query = query.sql`AND ${frag}`;
@@ -1532,10 +1510,9 @@ Deno.test("Nested fragment appended via .sql renumbers correctly", () => {
   assertEquals(query.parameters, ["X", "C", "D"]);
 });
 
-Deno.test("Nested subquery fragment renumbers inside parentheses", () => {
+test("Nested subquery fragment renumbers inside parentheses", () => {
   const sub = sql`SELECT id FROM orders WHERE total > ${100}`;
-  const query =
-    sql`SELECT * FROM users WHERE org = ${"acme"} AND id IN (${sub})`;
+  const query = sql`SELECT * FROM users WHERE org = ${"acme"} AND id IN (${sub})`;
   const expected = [
     "SELECT",
     "  *",
@@ -1550,12 +1527,97 @@ Deno.test("Nested subquery fragment renumbers inside parentheses", () => {
   assertEquals(query.parameters, ["acme", 100]);
 });
 
+test("Issue #1 repro: parenthesized OR fragment appended via .sql", () => {
+  const cond = sql`(type = ${"admin"} OR role = ${"owner"})`;
+  const query = sql`SELECT * FROM users WHERE status = ${"active"}`
+    .sql`AND ${cond}`;
+  const expected = [
+    "SELECT",
+    "  *",
+    "FROM",
+    "  users",
+    "WHERE",
+    "  status = $1",
+    "AND",
+    "  (type = $2 OR role = $3)",
+  ].join("\n");
+  assertEquals(query.toString(), expected);
+  assertEquals(query.parameters, ["active", "admin", "owner"]);
+});
+
+test("Nested fragment renumbering across the $9 -> $10 boundary", () => {
+  // 11 nested params shifted by 1: sequential replaces would turn $1 into
+  // $2 and then hit the "1" in $10/$11; \b must keep $1 from matching $10.
+  const vals = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  const list = sql`(${1}, ${2}, ${3}, ${4}, ${5}, ${6}, ${7}, ${8}, ${9}, ${10}, ${11})`;
+  const query = sql`SELECT * FROM t WHERE a = ${0} AND b IN ${list}`;
+  assertEquals(
+    query.toString().split("\n").at(-1),
+    "  b IN ($2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+  );
+  assertEquals(query.parameters, [0, ...vals]);
+});
+
+test("Three-level nesting renumbers every placeholder once", () => {
+  const l1 = sql`c = ${"c"} AND d = ${"d"}`;
+  const l2 = sql`b = ${"b"} AND ${l1} AND e = ${"e"}`;
+  const query = sql`SELECT * FROM t WHERE a = ${"a"} AND ${l2} AND f = ${"f"}`;
+  const where = query
+    .toString()
+    .split("\n")
+    .filter((l) => l.includes("="));
+  assertEquals(where, [
+    "  a = $1",
+    "  b = $2",
+    "  c = $3",
+    "  d = $4",
+    "  e = $5",
+    "  f = $6",
+  ]);
+  assertEquals(query.parameters, ["a", "b", "c", "d", "e", "f"]);
+});
+
+test("Same fragment nested twice gets distinct placeholders", () => {
+  const cond = sql`(type = ${"admin"} OR role = ${"owner"})`;
+  const query = sql`SELECT * FROM t WHERE x = ${"x"} AND ${cond} AND ${cond}`;
+  const where = query
+    .toString()
+    .split("\n")
+    .filter((l) => l.includes("("));
+  assertEquals(where, [
+    "  (type = $2 OR role = $3)",
+    "  (type = $4 OR role = $5)",
+  ]);
+  assertEquals(query.parameters, ["x", "admin", "owner", "admin", "owner"]);
+});
+
+test("Nested renumbering leaves $N inside string literals alone", () => {
+  const frag = sql`note = 'costs $1' AND k = ${"k"}`;
+  const query = sql`SELECT * FROM t WHERE a = ${"a"} AND ${frag}`;
+  const where = query
+    .toString()
+    .split("\n")
+    .filter((l) => l.includes("="));
+  assertEquals(where, ["  a = $1", "  note = 'costs $1'", "  k = $2"]);
+  assertEquals(query.parameters, ["a", "k"]);
+});
+
+test("Nested fragment with undefined (NULL) keeps numbering dense", () => {
+  const frag = sql`p = ${undefined} AND q = ${"q"}`;
+  const query = sql`SELECT * FROM t WHERE a = ${"a"} AND ${frag}`;
+  const where = query
+    .toString()
+    .split("\n")
+    .filter((l) => l.includes("="));
+  assertEquals(where, ["  a = $1", "  p = NULL", "  q = $2"]);
+  assertEquals(query.parameters, ["a", "q"]);
+});
+
 // --- HAVING tests ---
 
-Deno.test("SELECT with GROUP BY and HAVING", () => {
+test("SELECT with GROUP BY and HAVING", () => {
   const min = 5;
-  const query =
-    sql`SELECT dept, count(*) FROM employees GROUP BY dept HAVING count(*) > ${min} ORDER BY dept`;
+  const query = sql`SELECT dept, count(*) FROM employees GROUP BY dept HAVING count(*) > ${min} ORDER BY dept`;
   const expected = [
     "SELECT",
     "  dept,",
@@ -1573,7 +1635,7 @@ Deno.test("SELECT with GROUP BY and HAVING", () => {
   assertEquals(query.parameters, [min]);
 });
 
-Deno.test("Adding HAVING with sql method (multiple appends AND together)", () => {
+test("Adding HAVING with sql method (multiple appends AND together)", () => {
   const minCount = 10;
   const maxTotal = 100000;
   let query = sql`SELECT dept, count(*) FROM employees GROUP BY dept`;
@@ -1598,7 +1660,7 @@ Deno.test("Adding HAVING with sql method (multiple appends AND together)", () =>
 
 // --- Passthrough append tests ---
 
-Deno.test("Appending to a CTE passthrough query attaches fragments verbatim", () => {
+test("Appending to a CTE passthrough query attaches fragments verbatim", () => {
   const active = true;
   let query = sql`WITH recent AS (SELECT * FROM orders) SELECT * FROM recent`;
   query = query.sql`WHERE active = ${active}`;
@@ -1614,7 +1676,7 @@ Deno.test("Appending to a CTE passthrough query attaches fragments verbatim", ()
 
 // --- Fragment comment stripping ---
 
-Deno.test("Line comment in an appended fragment is stripped", () => {
+test("Line comment in an appended fragment is stripped", () => {
   let query = sql`SELECT * FROM t WHERE x = 1`;
   query = query.sql`AND y = 2 -- pending cleanup`;
   const expected = [
@@ -1632,7 +1694,7 @@ Deno.test("Line comment in an appended fragment is stripped", () => {
 
 // --- Top-level comma splitting in term lists ---
 
-Deno.test("ORDER BY with function arguments keeps commas inside parens intact", () => {
+test("ORDER BY with function arguments keeps commas inside parens intact", () => {
   const query = sql`SELECT * FROM t ORDER BY coalesce(a, b) DESC, name`;
   const expected = [
     "SELECT",
@@ -1646,9 +1708,8 @@ Deno.test("ORDER BY with function arguments keeps commas inside parens intact", 
   assertEquals(query.toString(), expected);
 });
 
-Deno.test("GROUP BY with function arguments keeps commas inside parens intact", () => {
-  const query =
-    sql`SELECT count(*) FROM t GROUP BY date_trunc('day', created_at), region`;
+test("GROUP BY with function arguments keeps commas inside parens intact", () => {
+  const query = sql`SELECT count(*) FROM t GROUP BY date_trunc('day', created_at), region`;
   const expected = [
     "SELECT",
     "  count(*)",

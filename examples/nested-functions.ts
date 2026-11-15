@@ -9,7 +9,7 @@
  * the formatSelectField regex greedy-captures across the `)` before OVER,
  * so window-function output will be malformed. See for yourself.
  *
- * Run: deno run --allow-read examples/nested-functions.ts
+ * Run: node examples/nested-functions.ts
  */
 import { sql } from "../mod.ts";
 

@@ -13,7 +13,7 @@
  *
  * @example
  * ```ts
- * import { sql } from "jsr:@skedia/literal-sql"; // Adjust import path as needed
+ * import { sql } from "@skedia/literal-sql";
  *
  * // Basic query with parameters
  * const userId = 123;
@@ -55,13 +55,12 @@
  * @example
  * ```ts
  * // Handling potential errors (e.g., invalid combinations)
- * import { sql } from "jsr:@skedia/literal-sql";
- * import { assertThrows } from "jsr:@std/assert";
+ * import { sql } from "@skedia/literal-sql";
+ * import { throws } from "node:assert/strict";
  *
- * assertThrows(
+ * throws(
  * () => sql`SELECT * FROM users RETURNING id`.toString(),
- * Error,
- * "RETURNING clause cannot be used with SELECT statements"
+ * /RETURNING clause cannot be used with SELECT statements/,
  * );
  * ```
  */
@@ -149,8 +148,8 @@ export class SQLQuery {
     this.raw = "";
     if (strings && strings.raw.length > 0) {
       // Check raw length for template presence
-      const { interpolatedQuery, initialParams, initialCounter } = this
-        ._interpolate(strings, values, 0, {});
+      const { interpolatedQuery, initialParams, initialCounter } =
+        this._interpolate(strings, values, 0, {});
       this.params = initialParams;
       this.paramCounter = initialCounter;
       this.parseInitialQuery(interpolatedQuery);
@@ -190,9 +189,13 @@ export class SQLQuery {
         // placeholder can never collide with a not-yet-shifted one.
         if (value instanceof SQLQuery) {
           const shift = currentCounter;
-          const nestedFragment = value.raw.replace(
-            /\$(\d+)\b/g,
-            (_match, n) => `$${Number(n) + shift}`,
+          // Mask string literals so text like 'costs $1' is not renumbered.
+          const { masked, unmask } = this.maskStringLiterals(value.raw);
+          const nestedFragment = unmask(
+            masked.replace(
+              /\$(\d+)\b/g,
+              (_match, n) => `$${Number(n) + shift}`,
+            ),
           );
           value.parameters.forEach((paramValue, index) => {
             currentParams[shift + index + 1] = paramValue;
@@ -310,8 +313,8 @@ export class SQLQuery {
   parseInitialQuery(query: string): void {
     // Strip SQL line comments (-- to end of line) OUTSIDE string literals,
     // so that '--' inside quotes is preserved while real comments are removed.
-    const { masked: commentMasked, unmask: commentUnmask } = this
-      .maskStringLiterals(query);
+    const { masked: commentMasked, unmask: commentUnmask } =
+      this.maskStringLiterals(query);
     // Strip comments, then the trailing whitespace they leave behind (on the
     // masked text, so whitespace inside string literals is untouched).
     query = commentUnmask(
@@ -422,10 +425,9 @@ export class SQLQuery {
     while ((joinMatch = joinRegex.exec(boundaryMask)) !== null) {
       if (joinMatch?.[0]?.trim()) {
         // Slice from original query (mask is length-preserving).
-        const joinContent = query.substring(
-          joinMatch.index!,
-          joinMatch.index! + joinMatch[0].length,
-        ).trim();
+        const joinContent = query
+          .substring(joinMatch.index!, joinMatch.index! + joinMatch[0].length)
+          .trim();
         if (
           joinContent &&
           !this.parts.joins.some((existing) => existing.includes(joinContent))
@@ -483,8 +485,8 @@ export class SQLQuery {
 
     // Mask string literals first so AND/OR inside quotes isn't seen as a
     // logical operator. Unmask at return.
-    const { masked: litMasked, unmask: litUnmask } = this
-      .maskStringLiterals(conditionString);
+    const { masked: litMasked, unmask: litUnmask } =
+      this.maskStringLiterals(conditionString);
 
     // Mask BETWEEN's AND so it isn't treated as a logical operator.
     // Placeholder must not contain the literal text "AND" or "OR" — the
@@ -558,9 +560,10 @@ export class SQLQuery {
    * Out of scope: dollar-quoting `$$...$$`, E'...' C-escapes, "..." identifiers.
    * @private
    */
-  private maskStringLiterals(
-    s: string,
-  ): { masked: string; unmask: (t: string) => string } {
+  private maskStringLiterals(s: string): {
+    masked: string;
+    unmask: (t: string) => string;
+  } {
     const map: string[] = [];
     let masked = "";
     let i = 0;
@@ -845,9 +848,7 @@ export class SQLQuery {
     // SELECT statements cannot include a RETURNING clause. (DML statements
     // pass through raw above and never reach this guard.)
     if (this.parts.returning.length > 0) {
-      throw new Error(
-        "RETURNING clause cannot be used with SELECT statements",
-      );
+      throw new Error("RETURNING clause cannot be used with SELECT statements");
     }
 
     const output: string[] = [];
@@ -969,8 +970,8 @@ export class SQLQuery {
     newQuery.paramCounter = this.paramCounter;
     newQuery.raw = this.raw;
     // Interpolate the new fragment, starting parameter numbering after existing ones
-    const { interpolatedQuery, initialParams, initialCounter } = newQuery
-      ._interpolate(
+    const { interpolatedQuery, initialParams, initialCounter } =
+      newQuery._interpolate(
         strings,
         values,
         newQuery.paramCounter,

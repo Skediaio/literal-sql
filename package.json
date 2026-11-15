@@ -1,0 +1,51 @@
+{
+  "name": "@skedia/literal-sql",
+  "version": "0.2.1",
+  "description": "Lightweight, zero-dependency raw SQL query builder using tagged template literals (PostgreSQL $1, $2, ... placeholders).",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Skediaio/literal-sql.git"
+  },
+  "keywords": [
+    "sql",
+    "postgres",
+    "query-builder",
+    "tagged-template"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/mod.d.ts",
+      "default": "./dist/mod.js"
+    },
+    "./cli": {
+      "types": "./dist/bin/cli.d.ts",
+      "default": "./dist/bin/cli.js"
+    }
+  },
+  "bin": {
+    "literal-sql": "dist/bin/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.ts\"",
+    "check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "biome lint .",
+    "fmt": "biome format --write .",
+    "ci": "biome ci . && tsc --noEmit && node --test \"tests/*.test.ts\"",
+    "cli": "node bin/cli.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

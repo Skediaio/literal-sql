@@ -6,15 +6,14 @@
  * the WITH/UNION passthrough. The remaining PARTIAL / UNSUPPORTED sections
  * document the current frontier.
  *
- * Run: deno run --allow-read examples/edge-cases.ts
+ * Run: node examples/edge-cases.ts
  */
 import { sql } from "../mod.ts";
 
 // --- (1) String literal containing AND/OR — WORKS (was broken before 0.2.0) ---
 // splitConditions masks string literals before scanning, so AND/OR inside
 // quotes is not treated as a logical operator.
-const stringWithAnd =
-  sql`SELECT * FROM users WHERE company = 'Brand AND Sons' OR notes = 'x OR y'`;
+const stringWithAnd = sql`SELECT * FROM users WHERE company = 'Brand AND Sons' OR notes = 'x OR y'`;
 console.log("--- (1) String literal containing AND/OR — WORKS ---");
 console.log(stringWithAnd.toString());
 console.log("Parameters:", stringWithAnd.parameters);
@@ -44,8 +43,7 @@ console.log(cte.toString());
 // A nested SQLQuery fragment is inlined as raw SQL text with its $N
 // placeholders renumbered past the outer query's parameters in a single
 // pass (no collisions). Wrap the fragment in parens yourself — it's SQL.
-const subquery =
-  sql`SELECT * FROM orders WHERE user_id IN (${sql`SELECT id FROM users WHERE active = ${true}`})`;
+const subquery = sql`SELECT * FROM orders WHERE user_id IN (${sql`SELECT id FROM users WHERE active = ${true}`})`;
 console.log("\n--- (4) Subquery via nested SQLQuery — WORKS ---");
 console.log(subquery.toString());
 console.log("Parameters:", subquery.parameters);
@@ -80,9 +78,7 @@ console.log(crossJoin.toString());
 const deepNested = sql`
   SELECT * FROM users
   WHERE id IN (${sql`SELECT user_id FROM orders WHERE total > ${100} AND created_at > ${"2025-01-01"}`})`;
-console.log(
-  "\n--- (7) Deeply-nested subquery — WORKS (param renumbering) ---",
-);
+console.log("\n--- (7) Deeply-nested subquery — WORKS (param renumbering) ---");
 console.log(deepNested.toString());
 console.log("Parameters:", deepNested.parameters);
 
