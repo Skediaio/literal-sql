@@ -54,6 +54,9 @@ tests/sql.test.ts Unit tests for the builder (formatting, params, DML, throws).
 tests/coverage.test.ts Exhaustive matrix: clause/value/nesting/passthrough
                   variants plus per-channel injection-resistance tests.
 tests/cli.test.ts End-to-end tests that shell out to `bin/cli.ts`.
+tests/robustness.test.ts Token-preservation corpus, fuzzing, injection,
+                  immutability, perf, and a "Known bugs" suite that fails
+                  until each pinned defect is fixed.
 examples/         example.ts (tagged-template usage) and basic-query.sql.
 package.json      npm manifest: exports -> dist/, bin `literal-sql`, scripts.
 jsr.json          JSR manifest: exports -> .ts sources.
@@ -79,9 +82,10 @@ CLI):
   `orderBy: string[]`
 - `limit`, `offset: string | null`, `returning: string[]`
 - `isDML: boolean` — set when the initial query begins with `INSERT` / `UPDATE`
-  / `DELETE` (always implies raw passthrough)
-- `isRawPassthrough: boolean` + `rawQuery: string | null` — set for DML and
-  when the query contains `WITH` / `UNION` / `INTERSECT` / `EXCEPT`;
+  / `DELETE` / `MERGE` (always implies raw passthrough)
+- `isRawPassthrough: boolean` + `rawQuery: string | null` — set for DML,
+  when the query starts with `WITH` / `VALUES` / `TABLE` / `(`, and when it
+  contains `UNION` / `INTERSECT` / `EXCEPT`;
   `toString` then returns the raw query unchanged (bypasses the SELECT-centric
   formatter to avoid corruption). Fragments appended via `.sql` are attached
   verbatim to `rawQuery` (never silently dropped).
@@ -101,12 +105,16 @@ Pipeline:
 2. **Parsing** (`parseInitialQuery` for the constructor, `parseQuery` for
    `.sql(...)` appends) — classifies fragments into `QueryParts` using simple
    case-insensitive keyword detection (`SELECT`, `FROM`, `JOIN`, `WHERE`,
-   `HAVING`, ...). Both strip `--` line comments outside string literals.
+   `HAVING`, ...). Both strip `--` and `/* */` comments outside string
+   literals, plus a trailing `;` (`stripComments`). When the builder itself
+   joins conditions with AND (a second `WHERE`/`HAVING`, or a bare
+   condition), `appendAnd` parenthesises any side with a top-level OR.
+   Explicit `.sql\`AND ...\`` / `.sql\`OR ...\`` fragments are kept as written.
    Two masking pre-passes make the keyword scanners robust:
    - `maskStringLiterals` — replaces `'...'` literals (with `''` doubling)
      with placeholders so AND/OR/`,`/`--` inside strings isn't mis-scanned.
    - `maskParenGroups` — length-preserving mask that replaces parenthesized
-     content with spaces so keywords inside `OVER (...)`, `CASE`, and
+     content and string-literal content with spaces so keywords inside `OVER (...)`, `CASE`, and
      subqueries don't trigger false clause boundaries. Clause content is sliced
      from the original query via match indices (preserving real parens).
 3. **Formatting** (`toString`) — raw-passthrough queries (DML, WITH/UNION/...)

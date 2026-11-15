@@ -104,6 +104,14 @@ interface Params {
   [key: number]: unknown;
 }
 /**
+ * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
+ * LEFT/RIGHT/FULL [OUTER], INNER or CROSS, optionally preceded by NATURAL.
+ */
+const JOIN_ALTERNATION =
+  "(?:NATURAL\\s+)?(?:LEFT\\s+(?:OUTER\\s+)?|RIGHT\\s+(?:OUTER\\s+)?|INNER\\s+|FULL\\s+(?:OUTER\\s+)?|CROSS\\s+)?JOIN\\b";
+/** Line (`--`) and block comments; scanned left to right so each wins in order. */
+const COMMENT_PATTERN = /\/\*[\s\S]*?\*\/|--[^\n]*/g;
+/**
  * Represents an SQL query with support for parameterization and incremental building.
  * Provides methods to parse, append, format, and retrieve the query string and parameters.
  */
@@ -229,14 +237,9 @@ export class SQLQuery {
    * @param query - The query fragment string to parse and append.
    */
   parseQuery(query: string): void {
-    // Strip line comments (outside string literals) so a trailing "-- note"
+    // Strip comments (outside string literals) so a trailing "-- note"
     // in a fragment can't comment out whatever toString() joins after it.
-    // Trailing whitespace left by stripping is removed on the masked text,
-    // so whitespace inside string literals is untouched.
-    const { masked, unmask } = this.maskStringLiterals(query);
-    const trimmedQuery = unmask(
-      masked.replace(/--[^\n]*/g, "").replace(/[ \t]+(?=\n|$)/g, ""),
-    ).trim();
+    const trimmedQuery = this.stripComments(query);
     if (!trimmedQuery) return;
     this.raw = this.raw ? `${this.raw}\n${trimmedQuery}` : trimmedQuery;
     // Raw-passthrough queries are never re-parsed; appended fragments are
@@ -247,61 +250,89 @@ export class SQLQuery {
         : trimmedQuery;
       return;
     }
-    const lowerQuery = trimmedQuery.toLowerCase();
-    // Basic clause detection for appending
-    if (lowerQuery.startsWith("from ")) {
-      this.parts.from = trimmedQuery.substring(4).trim();
-    } else if (
-      lowerQuery.startsWith("join ") ||
-      lowerQuery.startsWith("left join ") ||
-      lowerQuery.startsWith("right join ") ||
-      lowerQuery.startsWith("inner join ") ||
-      lowerQuery.startsWith("full outer join ") ||
-      lowerQuery.startsWith("full join ") ||
-      lowerQuery.startsWith("cross join ") ||
-      lowerQuery.startsWith("natural left join ") ||
-      lowerQuery.startsWith("natural right join ") ||
-      lowerQuery.startsWith("natural inner join ") ||
-      lowerQuery.startsWith("natural full outer join ") ||
-      lowerQuery.startsWith("natural full join ") ||
-      lowerQuery.startsWith("natural join ")
-    ) {
-      if (trimmedQuery) this.parts.joins.push(trimmedQuery);
-    } else if (lowerQuery.startsWith("where ")) {
-      const condition = trimmedQuery.substring(5).trim();
-      if (condition) {
-        if (this.parts.where.length === 0) this.parts.where.push(condition);
-        else this.parts.where.push(`AND ${condition}`); // Assume AND if WHERE exists
-      }
-    } else if (lowerQuery.startsWith("and ")) {
-      if (trimmedQuery.substring(3).trim()) this.parts.where.push(trimmedQuery);
-    } else if (lowerQuery.startsWith("or ")) {
-      if (trimmedQuery.substring(2).trim()) this.parts.where.push(trimmedQuery);
-    } else if (lowerQuery.startsWith("group by ")) {
-      const content = trimmedQuery.substring(8).trim();
-      if (content) this.parts.groupBy.push(content);
-    } else if (lowerQuery.startsWith("having ")) {
-      const content = trimmedQuery.substring(6).trim();
-      if (content) {
-        if (this.parts.having.length === 0) this.parts.having.push(content);
-        else this.parts.having.push(`AND ${content}`); // Assume AND if HAVING exists
-      }
-    } else if (lowerQuery.startsWith("order by ")) {
-      const content = trimmedQuery.substring(8).trim();
-      if (content) this.parts.orderBy.push(content);
-    } else if (lowerQuery.startsWith("limit ")) {
-      this.parts.limit = trimmedQuery.substring(5).trim();
-    } else if (lowerQuery.startsWith("offset ")) {
-      this.parts.offset = trimmedQuery.substring(6).trim();
-    } else if (lowerQuery.startsWith("returning ")) {
-      const content = trimmedQuery.substring(9).trim();
-      if (content) this.parts.returning.push(content);
-    } else if (trimmedQuery) {
-      // Default: Add as WHERE condition
-      if (this.parts.where.length > 0) {
-        this.parts.where.push(`AND ${trimmedQuery}`);
-      } else this.parts.where.push(trimmedQuery);
+    // Basic clause detection for appending. Keywords may be followed by any
+    // whitespace (newline, tab), not just a single space.
+    if (new RegExp(`^${JOIN_ALTERNATION}`, "i").test(trimmedQuery)) {
+      this.parts.joins.push(trimmedQuery);
+      return;
     }
+    const keyword = trimmedQuery.match(
+      /^(select|from|where|and|or|group\s+by|having|order\s+by|limit|offset|returning)\b/i,
+    );
+    const kw = keyword ? keyword[1].toLowerCase().replace(/\s+/g, " ") : null;
+    const content = keyword
+      ? trimmedQuery.substring(keyword[0].length).trim()
+      : trimmedQuery;
+    if (!content) return;
+    switch (kw) {
+      case "select":
+        this.parts.select.push(
+          ...this.splitTopLevelCommas(content)
+            .map((f) => f.trim())
+            .filter((f) => f),
+        );
+        break;
+      case "from":
+        this.parts.from = content;
+        break;
+      case "and":
+      case "or":
+        this.parts.where.push(trimmedQuery);
+        break;
+      case "group by":
+        this.parts.groupBy.push(content);
+        break;
+      case "having":
+        this.appendAnd(this.parts.having, content);
+        break;
+      case "order by":
+        this.parts.orderBy.push(content);
+        break;
+      case "limit":
+        this.parts.limit = content;
+        break;
+      case "offset":
+        this.parts.offset = content;
+        break;
+      case "returning":
+        this.parts.returning.push(content);
+        break;
+      default:
+        // "WHERE ..." or a bare condition: AND it onto the existing WHERE.
+        this.appendAnd(this.parts.where, content);
+    }
+  }
+  /**
+   * Appends a condition the builder itself joins with AND. Either side that
+   * contains a top-level OR is parenthesised, so the OR cannot escape the
+   * filter on the other side (`a OR b` + `c` -> `(a OR b) AND c`).
+   * @private
+   */
+  private appendAnd(list: string[], condition: string): void {
+    if (list.length === 0) {
+      list.push(condition);
+      return;
+    }
+    const hasTopLevelOr = (s: string) =>
+      this.splitConditions(s).some((p) => /^OR\b/i.test(p));
+    const existing = list.join(" ");
+    if (hasTopLevelOr(existing)) list.splice(0, list.length, `(${existing})`);
+    list.push(`AND ${hasTopLevelOr(condition) ? `(${condition})` : condition}`);
+  }
+  /**
+   * Strips `--` and `/* *\/` comments outside string literals, the trailing
+   * whitespace they leave, and a trailing statement `;`, then trims.
+   * Works on the string-masked text so literals are never touched.
+   * @private
+   */
+  private stripComments(query: string): string {
+    const { masked, unmask } = this.maskStringLiterals(query);
+    return unmask(
+      masked
+        .replace(COMMENT_PATTERN, (m) => (m.startsWith("--") ? "" : " "))
+        .replace(/[ \t]+(?=\n|$)/g, "")
+        .replace(/;\s*$/, ""),
+    ).trim();
   }
   /**
    * Parses the initial complete SQL query string provided to the constructor or `sql` tag.
@@ -311,16 +342,10 @@ export class SQLQuery {
    * @param query - The initial SQL query string.
    */
   parseInitialQuery(query: string): void {
-    // Strip SQL line comments (-- to end of line) OUTSIDE string literals,
-    // so that '--' inside quotes is preserved while real comments are removed.
-    const { masked: commentMasked, unmask: commentUnmask } =
-      this.maskStringLiterals(query);
-    // Strip comments, then the trailing whitespace they leave behind (on the
-    // masked text, so whitespace inside string literals is untouched).
-    query = commentUnmask(
-      commentMasked.replace(/--[^\n]*/g, "").replace(/[ \t]+(?=\n|$)/g, ""),
-    );
-    const originalTrimmed = query.trim();
+    // Strip comments OUTSIDE string literals, so that '--' inside quotes is
+    // preserved while real comments are removed.
+    query = this.stripComments(query);
+    const originalTrimmed = query;
     const originalTrimmedLower = originalTrimmed.toLowerCase();
     this.raw = originalTrimmed;
 
@@ -329,12 +354,14 @@ export class SQLQuery {
     // (e.g. rewrite an UPDATE as a SELECT, or misclassify a second SELECT
     // as WHERE). The statement is kept verbatim (trimmed, comments
     // stripped); parameters are still lifted to $N by _interpolate.
-    const isDMLQuery = /^\s*(insert|update|delete)\b/i.test(
+    const isDMLQuery = /^\s*(insert|update|delete|merge)\b/i.test(
       originalTrimmedLower,
     );
     if (
       isDMLQuery ||
-      /^\s*WITH\b/i.test(originalTrimmedLower) ||
+      // WITH, VALUES, TABLE, and parenthesised statements are not plain
+      // SELECTs; formatting them would corrupt or drop them.
+      /^\s*(?:(?:with|values|table)\b|\()/i.test(originalTrimmedLower) ||
       /\bUNION\b|\bINTERSECT\b|\bEXCEPT\b/i.test(
         this.maskStringLiterals(originalTrimmedLower).masked,
       )
@@ -350,35 +377,33 @@ export class SQLQuery {
     // Clause extraction logic (simplified regex matching)
     // Note: This simple regex approach might misinterpret nested queries or complex syntax.
     //
-    // JOIN_ALTERNATION matches any JOIN keyword as a unit (bare JOIN, or prefixed
-    // with LEFT/RIGHT/INNER/FULL [OUTER]/CROSS, optionally preceded by NATURAL).
-    // Used in the select/from/joins lookaheads so the lazy capture stops at the
-    // START of the full JOIN construct rather than at the bare JOIN inside it.
-    const JOIN_ALTERNATION =
-      "(?:NATURAL\\s+)?(?:LEFT\\s+|RIGHT\\s+|INNER\\s+|FULL\\s+(?:OUTER\\s+)?|CROSS\\s+)?JOIN\\b";
+    // JOIN_ALTERNATION is used in the select/from/joins lookaheads so the lazy
+    // capture stops at the START of the full JOIN construct rather than at
+    // the bare JOIN inside it. GROUP/ORDER and BY may be split by any
+    // whitespace.
     const clauses: { [key: string]: RegExp } = {
       select: new RegExp(
-        `\\bSELECT\\b([\\s\\S]*?)(?=\\bFROM\\b|${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP BY\\b|\\bHAVING\\b|\\bORDER BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
+        `\\bSELECT\\b([\\s\\S]*?)(?=\\bFROM\\b|${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
         "i",
       ),
       from: new RegExp(
-        `\\bFROM\\b([\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP BY\\b|\\bHAVING\\b|\\bORDER BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
+        `\\bFROM\\b([\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
         "i",
       ),
       joins: new RegExp(
-        `(\\b${JOIN_ALTERNATION}[\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP BY\\b|\\bHAVING\\b|\\bORDER BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
+        `(\\b${JOIN_ALTERNATION}[\\s\\S]*?)(?=${JOIN_ALTERNATION}|\\bWHERE\\b|\\bGROUP\\s+BY\\b|\\bHAVING\\b|\\bORDER\\s+BY\\b|\\bLIMIT\\b|\\bOFFSET\\b|\\bRETURNING\\b|$)`,
         "gi",
       ),
       where:
-        /\bWHERE\b([\s\S]*?)(?=\bGROUP BY\b|\bHAVING\b|\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
+        /\bWHERE\b([\s\S]*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
       groupBy:
-        /\bGROUP BY\b([\s\S]*?)(?=\bHAVING\b|\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
+        /\bGROUP\s+BY\b([\s\S]*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
       having:
-        /\bHAVING\b([\s\S]*?)(?=\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
+        /\bHAVING\b([\s\S]*?)(?=\bORDER\s+BY\b|\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
       orderBy:
-        /\bORDER BY\b([\s\S]*?)(?=\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
+        /\bORDER\s+BY\b([\s\S]*?)(?=\bLIMIT\b|\bOFFSET\b|\bRETURNING\b|$)/i,
       limit: /\bLIMIT\b([\s\S]*?)(?=\bOFFSET\b|\bRETURNING\b|$)/i,
-      offset: /\bOFFSET\b([\s\S]*?)(?=\bRETURNING\b|$)/i,
+      offset: /\bOFFSET\b([\s\S]*?)(?=\bLIMIT\b|\bRETURNING\b|$)/i,
       returning: /\bRETURNING\b([\s\S]*?)$/i,
     };
 
@@ -396,7 +421,7 @@ export class SQLQuery {
 
     // --- Extract SELECT ---
     const selectMatch = boundaryMask.match(clauses.select);
-    if (selectMatch && selectMatch[1].trim()) {
+    if (selectMatch && sliceContent(selectMatch).trim()) {
       const fields = this.splitTopLevelCommas(sliceContent(selectMatch))
         .map((f) => f.trim())
         .filter((f) => f);
@@ -416,7 +441,7 @@ export class SQLQuery {
     }
     // --- Extract other clauses ---
     const fromMatch = boundaryMask.match(clauses.from);
-    if (fromMatch && fromMatch[1].trim()) {
+    if (fromMatch && sliceContent(fromMatch).trim()) {
       this.parts.from = sliceContent(fromMatch).trim();
     }
     let joinMatch: RegExpExecArray | null;
@@ -428,45 +453,40 @@ export class SQLQuery {
         const joinContent = query
           .substring(joinMatch.index!, joinMatch.index! + joinMatch[0].length)
           .trim();
-        if (
-          joinContent &&
-          !this.parts.joins.some((existing) => existing.includes(joinContent))
-        ) {
-          this.parts.joins.push(joinContent);
-        }
+        if (joinContent) this.parts.joins.push(joinContent);
       }
       if (joinMatch && joinRegex.lastIndex === joinMatch.index) {
         joinRegex.lastIndex++;
       }
     }
     const whereMatch = boundaryMask.match(clauses.where);
-    if (whereMatch && whereMatch[1].trim()) {
+    if (whereMatch && sliceContent(whereMatch).trim()) {
       this.parts.where.push(sliceContent(whereMatch).trim());
     }
     const groupByMatch = boundaryMask.match(clauses.groupBy);
-    if (groupByMatch && groupByMatch[1].trim()) {
+    if (groupByMatch && sliceContent(groupByMatch).trim()) {
       this.parts.groupBy.push(sliceContent(groupByMatch).trim());
     }
     const havingMatch = boundaryMask.match(clauses.having);
-    if (havingMatch && havingMatch[1].trim()) {
+    if (havingMatch && sliceContent(havingMatch).trim()) {
       this.parts.having.push(sliceContent(havingMatch).trim());
     }
     const orderByMatch = boundaryMask.match(clauses.orderBy);
-    if (orderByMatch && orderByMatch[1].trim()) {
+    if (orderByMatch && sliceContent(orderByMatch).trim()) {
       this.parts.orderBy.push(sliceContent(orderByMatch).trim());
     }
     const limitMatch = boundaryMask.match(clauses.limit);
-    if (limitMatch && limitMatch[1].trim()) {
+    if (limitMatch && sliceContent(limitMatch).trim()) {
       this.parts.limit = sliceContent(limitMatch).trim();
     }
     const offsetMatch = boundaryMask.match(clauses.offset);
-    if (offsetMatch && offsetMatch[1].trim()) {
+    if (offsetMatch && sliceContent(offsetMatch).trim()) {
       this.parts.offset = sliceContent(offsetMatch).trim();
     }
 
     // Extract RETURNING clause (used for DML statements)
     const returningMatch = boundaryMask.match(clauses.returning);
-    if (returningMatch && returningMatch[1].trim()) {
+    if (returningMatch && sliceContent(returningMatch).trim()) {
       this.parts.returning.push(sliceContent(returningMatch).trim());
     }
     // Note: Default SELECT * logic is handled in toString()
@@ -516,7 +536,11 @@ export class SQLQuery {
         i++;
         continue;
       }
-      if (parenDepth === 0) {
+      // Only at a word start: "color", "brand" and "FOR" must not split.
+      if (
+        parenDepth === 0 &&
+        (i === 0 || !/[A-Za-z0-9_$]/.test(masked[i - 1]))
+      ) {
         const m = masked.substring(i).match(/^(AND|OR)(?![A-Za-z0-9_])/i);
         if (m) {
           if (current.trim()) {
@@ -599,8 +623,8 @@ export class SQLQuery {
 
   /**
    * Returns a length-preserving mask of `s` with all parenthesized group
-   * content replaced by spaces. String literals (with `''` doubling) are
-   * passed through unchanged so quoted parens don't affect depth tracking.
+   * content and string-literal content (with `''` doubling) replaced by
+   * spaces, so quoted parens and keywords don't affect clause detection.
    * Used by parseInitialQuery to detect clause boundaries on the mask, then
    * slice content from the original query — so keywords inside parens
    * (ORDER BY inside `OVER (...)`, CASE/WHEN, subqueries) don't trigger
@@ -621,13 +645,15 @@ export class SQLQuery {
         continue;
       }
       if (inString) {
+        // Blank literal content too, so keywords inside strings (e.g.
+        // 'no limit here') can't be seen as clause boundaries.
         if (ch === "'" && s[i + 1] === "'") {
-          masked += "''";
+          masked += "  ";
           i += 2;
           continue;
         }
         if (ch === "'") inString = false;
-        masked += ch;
+        masked += ch === "'" ? ch : " ";
         i++;
         continue;
       }
@@ -685,7 +711,7 @@ export class SQLQuery {
   private formatJoinClause(joinClause: string): string[] {
     const formattedLines: string[] = [];
     const joinRegex =
-      /^((?:NATURAL\s+)?(?:LEFT\s+|RIGHT\s+|INNER\s+|FULL\s+(?:OUTER\s+)?|CROSS\s+)?JOIN)\s+([\s\S]+?)(\s+ON\s+([\s\S]+))?$/i;
+      /^((?:NATURAL\s+)?(?:LEFT\s+(?:OUTER\s+)?|RIGHT\s+(?:OUTER\s+)?|INNER\s+|FULL\s+(?:OUTER\s+)?|CROSS\s+)?JOIN)\s+([\s\S]+?)(\s+ON\s+([\s\S]+))?$/i;
     const match = joinClause.match(joinRegex);
     if (match) {
       const [, joinType = "JOIN", tableInfoRaw, , onConditions] = match;
