@@ -55,8 +55,12 @@ tests/coverage.test.ts Exhaustive matrix: clause/value/nesting/passthrough
                   variants plus per-channel injection-resistance tests.
 tests/cli.test.ts End-to-end tests that shell out to `bin/cli.ts`.
 tests/robustness.test.ts Token-preservation corpus, fuzzing, injection,
-                  immutability, perf, and a "Known bugs" suite that fails
-                  until each pinned defect is fixed.
+                  immutability, perf, and a "Known bugs" suite: one test per
+                  defect that was found and fixed.
+tests/spec.test.ts Specification of the scanner (every quoting form), of
+                  clause placement in any statement, and of AND/OR targets.
+tests/dialect.test.ts `dialect()` placeholder styles and backtick / bracket
+                  identifiers.
 examples/         example.ts (tagged-template usage) and basic-query.sql.
 package.json      npm manifest: exports -> dist/, bin `literal-sql`, scripts.
 jsr.json          JSR manifest: exports -> .ts sources.
@@ -68,75 +72,74 @@ biome.json        Format + lint config (ts/json only; markdown untouched).
 
 ## Architecture
 
-`SQLQuery` is the only class. Instances are **immutable** — every mutating
-operation (a chained `.sql`) returns a new `SQLQuery` holding a one-level copy
-of `parts` (strings and string arrays only) and its own `params` array.
+`SQLQuery` is the only class. Instances are **immutable** — a chained `.sql`
+returns a new `SQLQuery`. Its whole state is three private fields:
 
-Internal model (`QueryParts` — private, as are `params` and `raw`; the public
-surface is the constructor, `sql`/`.sql`, `toString()`, `.query`,
-`.parameters`, plus `parseInitialQuery`/`parseQuery` used by the CLI):
+- `text` — the statement as SQL text: comments stripped, `${}` values lifted
+  to `$N`, appended clauses already spliced into their place. There is no
+  parsed model next to it; everything is derived from the text on demand.
+- `params` — a plain array (`$N` is `params[N - 1]`).
+- `lastCondition` — `join`, `where` or `having`: the condition an appended
+  `AND` / `OR` continues.
 
-- `select: string[]`, `from: string | null`, `joins: string[]`
-- `where: string[]`, `groupBy: string[]`, `having: string[]`,
-  `orderBy: string[]`
-- `limit`, `offset: string | null`, `returning: string[]`
-- `isRawPassthrough: boolean` — set unless the initial text starts with a
-  SELECT-statement clause keyword (`SELECT` / `FROM` / `JOIN` / `WHERE` /
-  `GROUP BY` / `HAVING` / `ORDER BY` / `LIMIT` / `OFFSET`), and also when it
-  contains `UNION` / `INTERSECT` / `EXCEPT`. So DML, DDL, `WITH`, `VALUES`,
-  `EXPLAIN`, `(`... and bare fragments like `a = $1` all pass through:
-  `toString` returns `raw` unchanged. Fragments appended via `.sql` are
-  attached verbatim to `raw` (never silently dropped).
+(`masked` is a cache of `mask(text)`, kept in step by `splice`.)
 
-`params` is a plain array (`$N` is `params[N - 1]`). `raw` is the
-comment-stripped interpolated SQL text. Nesting a query inside another
-inlines `raw`, or `toString()` once clauses were appended to a parsed query
-(appends may arrive out of statement order, so `raw` is cleared then), and
-renumbers its `$N` placeholders in a single pass, so shifted placeholders
-cannot collide with not-yet-shifted ones.
+The public surface is the constructor, `sql`/`.sql`, `toString()`, `.query`,
+`.parameters`, `dialect()`, plus `parseInitialQuery`/`parseQuery` used by the CLI.
+Everything else is a module-level function in `mod.ts`.
 
-Pipeline:
+Building blocks:
 
-1. **Interpolation** (`_interpolate`) — turns the tagged template into a SQL
-   string, substituting each `${value}` with `$N` and recording the value in
-   `params`. Nested `SQLQuery` fragments are inlined with single-pass
-   parameter renumbering. `undefined` becomes the literal `NULL`; `null`
-   becomes a parameter (Postgres semantics).
-2. **Parsing** (`parseInitialQuery` for the constructor, `parseQuery` for
-   `.sql(...)` appends) — both strip `--` and `/* */` comments plus a
-   trailing `;` (`stripComments`, one scan that also matches quoted text, so
-   markers inside quotes and quotes inside comments are not misread), cut the
-   text into top-level clauses (`splitClauses`) and hand each one to
-   `addClause`, which files it under the matching `QueryParts` entry. A
-   fragment may therefore hold several clauses (`WHERE a ORDER BY b`).
-   When the builder itself joins conditions with AND (a second
-   `WHERE`/`HAVING`, or a bare condition), `appendAnd` parenthesises any side
-   with a top-level OR. Explicit `.sql\`AND ...\`` / `.sql\`OR ...\``
-   fragments are kept as written and always go to `WHERE`.
-   Two masks make the keyword scanners robust:
-   - `maskStringLiterals` — replaces `'...'` literals and `"..."` identifiers
-     with placeholders so AND/OR/`,`/`$N` inside quotes isn't mis-scanned.
-   All splitting (clauses, AND/OR, commas) goes through one helper,
-   `splitTopLevel(text, pattern)`: find matches on the mask, slice the original.
-   - `maskParenGroups` — length-preserving mask that blanks parenthesized
-     and quoted content so keywords inside `OVER (...)`, `CASE`, and
-     subqueries don't trigger false clause boundaries. Clause content is
-     sliced from the original text via match indices (preserving real parens).
-3. **Formatting** (`toString`) — raw-passthrough queries (DML, WITH/UNION/...)
-   are returned verbatim. Everything else is emitted as multi-line SQL with
-   2-space indentation:
-   - `SELECT` / `FROM` / `JOIN` / `WHERE` / `GROUP BY` / `HAVING` /
-     `ORDER BY` each on their own line; their terms indented underneath, one
-     per line. Term lists split on top-level commas only (function arguments
-     stay intact).
-   - `AND` / `OR` on their own line within `WHERE` / `HAVING` and within
-     `JOIN ... ON` (shared helper: `formatConditionClause`).
-   - `LIMIT` / `OFFSET` stay on a single line.
-   - Validates invariants and throws:
-     - `SELECT` combined with `RETURNING` → throws (DML never reaches this
-       guard — it passes through raw).
-   - An empty query renders as `""`; `SELECT *` is only added for a query
-     that has a `FROM` but no select list.
+1. **Scanner** (`scan`) — one regex finds the tokens that matter: quoted text
+   (`'...'`, `E'...'`, `"..."`, `$tag$...$tag$`), comments (block comments
+   nest), `$N`, brackets, and `CASE` / `END`. Everything between is plain.
+   `mask(text)` uses it to blank whatever is quoted, commented or nested in
+   `( )`, `[ ]` or `CASE ... END`, keeping offsets. A keyword found on the
+   mask is top-level by construction; content is sliced from the real text.
+   All splitting (clauses, AND/OR, commas) is `splitTopLevel(text, pattern)`.
+2. **Clauses** (`findClauses`) — top-level clause keywords with a rank
+   (`RANKS`: SELECT, FROM, JOIN, WHERE, GROUP BY, HAVING, WINDOW, ORDER BY,
+   LIMIT/OFFSET, FETCH, FOR, RETURNING). Set operations, `ON CONFLICT`,
+   `DO UPDATE` / `DO NOTHING` and `WHEN` are *barriers*: only the clauses
+   after the last one are considered. A keyword right after a `.` (`t.end`,
+   `s.offset`) is a column, never a clause, barrier, CASE or END.
+   This works for any statement (SELECT, DML, `WITH ...`, `EXPLAIN ...`);
+   no grammar is involved.
+3. **Interpolation** (`_interpolate`) — substitutes each `${value}` with `$N`
+   and records the value. A nested `SQLQuery` is inlined as its `text` with
+   its `$N` tokens shifted. `undefined` becomes the literal `NULL`; `null`
+   becomes a parameter.
+4. **Appending** (`parseQuery` -> `place` -> `splice`) — a fragment is cut
+   into clauses and each one is put in the text:
+   - `WHERE` / `HAVING` that already exists: ANDed on, with parentheses
+     around any side that has a top-level OR (`wrapOr`).
+   - list clauses (`SELECT`, `GROUP BY`, `ORDER BY`, `WINDOW`, `RETURNING`):
+     extended with a comma.
+   - single-value clauses (`FROM`, `LIMIT`, `OFFSET`, `FETCH`): replaced.
+   - anything else (new clause, another `JOIN` / `FOR`): inserted before the
+     first clause with a higher rank, else at the end.
+   - `AND` / `OR`: attached, as written, to the end of the `lastCondition`
+     clause (default: the last condition in the text). Without any condition
+     it starts a `WHERE`, placed by rank, in any statement.
+   - a bare condition is a `WHERE` in a SELECT; in any other statement a
+     fragment that does not start with a clause keyword (`SET ...`,
+     `ON CONFLICT ...`, `UNION ...`) is attached at the end as written.
+   - if the statement repeats a clause or has clauses out of order and the
+     new clause would have to go among them (a `WHERE` on
+     `SELECT ... FOR UPDATE LIMIT 1`), `place` **throws** rather than guess.
+5. **Formatting** (`toString`) — only text that starts with a SELECT-statement
+   clause keyword and has no barrier is formatted; every other statement is
+   returned as its `text`. Formatting walks the clauses in text order
+   (`formatClause`): keyword on its own line, terms indented 2, one per line;
+   `AND` / `OR` on their own line in `WHERE` / `HAVING`; `LIMIT`, `OFFSET`,
+   `FETCH`, `FOR` on a single line. It never reorders.
+   - **Guard:** the result is compared with the input by `signature`
+     (whitespace and keyword case ignored, quoted text exact). If they differ
+     in anything but layout, `toString` returns the text as written. So a
+     formatter bug can cost layout, never a token.
+   - `SELECT` combined with `RETURNING` throws.
+   - An empty query renders as `""`; `SELECT *` is added only for a statement
+     that starts at `FROM`.
 
 ### CLI
 
@@ -149,8 +152,8 @@ stdout; parameters (if any) are printed as JSON below the query.
 - **Formatting:** 2-space indent, double quotes, semicolons required, line width
   80 — all enforced by Biome (`biome.json`).
 - **Exports:** keep the public surface minimal — only `SQLQuery` and `sql`.
-  Internal helpers and state stay private (`_interpolate`, `splitConditions`,
-  `formatJoinClause`, `parts`, `params`, `raw`).
+  Internal state stays private (`text`, `params`, `lastCondition`); helpers
+  are module-level functions that are not exported.
   `parseInitialQuery` / `parseQuery` remain public because the CLI drives
   them directly.
 - **Immutability:** never mutate `this` in chainable methods; always return a
@@ -165,24 +168,30 @@ stdout; parameters (if any) are printed as JSON below the query.
 
 ## Gotchas
 
-- `parseInitialQuery` and `toString` are SELECT-centric. Everything that
-  is not a plain SELECT (DML, DDL, `EXPLAIN`, ...) is therefore raw passthrough: the
-  statement text is preserved verbatim (trimmed, comments stripped, `${}`
-  lifted to `$N`) and never reformatted. Appended `.sql` fragments attach
-  verbatim below the statement. The DML tests in `tests/sql.test.ts` pin this.
-- The parser uses regex / keyword-prefix matching with two masking pre-passes
-  (`maskStringLiterals` and `maskParenGroups`) that make scanners
-  string-literal-aware and parenthesis-depth-aware. As of 0.2.0, string
-  literals containing AND/OR/`,`/`--` are handled correctly, window functions
-  with `OVER (...)` are preserved, and `WITH`/`UNION`/`INTERSECT`/`EXCEPT`
-  queries pass through raw (avoiding silent corruption). Double-quoted
-  identifiers are opaque as of 0.3.0. Still NOT first-class: dollar-quoting
-  `$$...$$`, `E'...'` escapes, nested block comments, `LATERAL`, trailing
-  `FOR UPDATE` / `WINDOW` / `FETCH` (they stay inside the preceding clause),
-  and recursive re-formatting of subqueries.
+- Only SELECT statements are *formatted*. Every statement takes *appends*:
+  a clause appended to DML, a CTE query or `EXPLAIN ...` is placed by rank
+  (`WHERE` before `RETURNING`, ...). Text that was never appended to is
+  returned exactly as written.
+- There is no SQL grammar. Clause placement relies on the fixed clause order
+  of a statement; when that order is not recognisable `place` throws. New
+  syntax that puts a clause keyword at top level in another role needs an
+  entry in `CLAUSE_KEYWORDS` / `BARRIER_KEYWORDS`, with a test in
+  `tests/spec.test.ts`.
+- Not handled: backslash escapes in plain `'...'` (only with
+  `standard_conforming_strings = off`, or MySQL's default; adding them
+  would break standard strings such as `'C:\'`), MySQL `#` comments
+  (`#>` is a PostgreSQL operator), comments / `$N` inside SQL Server
+  bracket identifiers (scanning happens before `dialect()`, and `[...]` is
+  a PostgreSQL subscript), and re-formatting of subqueries.
+- An appended `AND` / `OR` with no condition to continue starts a `WHERE`
+  only when the text is a statement or clause fragment (`STATEMENT_START`);
+  on a bare condition (`deleted_at IS NULL`) it is attached as written.
+- A hand-written `$N` (a `param` token in template text or in a string given
+  to `parseInitialQuery` / `parseQuery`) is fine while the query has no
+  `${}` parameters; combining both throws at build time (`handWritten` field).
 - `toString()` runs validation lazily — calling `.parameters` does not throw
   even if the query is invalid. Only `.toString()` / `.query` will throw.
-  Passthrough queries (`WITH`/`UNION`/...) bypass the throw guard by design.
+  Statements that are not formatted never throw there.
 - The CLI walks `argv` manually (not `parseArgs` output) so that clause
   ordering on the command line is preserved in the output.
 - `tests/cli.test.ts` end-to-end tests spawn `node bin/cli.ts`. The expected

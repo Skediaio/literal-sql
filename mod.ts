@@ -4,10 +4,10 @@
  *
  * This module provides tools for building SQL queries safely and incrementally.
  * It handles parameter interpolation automatically (using $1, $2 style placeholders)
- * and helps prevent SQL injection vulnerabilities. SELECT queries are emitted
- * as consistently formatted, multi-line SQL for readability; DML statements
- * (INSERT/UPDATE/DELETE) and WITH/UNION/INTERSECT/EXCEPT queries pass through
- * verbatim so the formatter can never corrupt them.
+ * and helps prevent SQL injection vulnerabilities. Every statement (SELECT,
+ * DML, WITH, EXPLAIN, ...) takes appended clauses, each put where the
+ * statement expects it. Only SELECT statements are formatted as multi-line
+ * SQL; any other statement is returned as its text.
  *
  * @module
  *
@@ -64,80 +64,459 @@
  * );
  * ```
  */
-/**
- * Interface defining the structure for storing parsed SQL query parts.
- * @private
- */
-interface QueryParts {
-  /** SELECT fields or expressions */
-  select: string[];
-  /** FROM table name and aliases */
-  from: string | null;
-  /** JOIN clauses (each entry is a full join string like "LEFT JOIN table ON ...") */
-  joins: string[];
-  /** WHERE condition strings (raw content after WHERE, possibly including leading AND/OR for appended parts) */
-  where: string[];
-  /** GROUP BY expressions */
-  groupBy: string[];
-  /** HAVING condition strings */
-  having: string[];
-  /** ORDER BY expressions */
-  orderBy: string[];
-  /** LIMIT value */
-  limit: string | null;
-  /** OFFSET value */
-  offset: string | null;
-  /** RETURNING clause content */
-  returning: string[];
-  /** True when the text is not a plain SELECT / clause fragment; it is then kept verbatim. */
-  isRawPassthrough: boolean;
+/** A piece of SQL text that is more than plain words and operators. */
+interface Token {
+  kind: "comment" | "quoted" | "param" | "open" | "close";
+  start: number;
+  end: number;
 }
+/** A top-level clause of a statement, as offsets into its text. */
+interface Clause {
+  /** select, from, join, where, group, having, window, order, limit, offset, fetch, for, returning. */
+  key: string;
+  start: number;
+  /** Where the content begins, right after the keyword. */
+  contentStart: number;
+  end: number;
+}
+/**
+ * Everything the scanner must recognise to know what is quoted, commented
+ * or nested: E'...' (backslash escapes), '...', "...", `...` (MySQL,
+ * SQLite), line comment,
+ * block-comment opener, dollar-quote opener, `$N`, brackets, CASE and END
+ * (not after a `.` and not part of a word: `t.end` and `case$flag` are
+ * columns; `$` is a word character in identifiers). An unterminated quote runs to the
+ * end of the text.
+ */
+const TOKEN =
+  /(?<![\w$])E'(?:[^'\\]|\\[\s\S]|'')*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|(?<![\w$.])(?:CASE|END)(?![\w$])/gi;
 /**
  * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
  * LEFT/RIGHT/FULL [OUTER], INNER or CROSS, optionally preceded by NATURAL.
  */
-const JOIN_ALTERNATION =
-  "(?:NATURAL\\s+)?(?:LEFT\\s+(?:OUTER\\s+)?|RIGHT\\s+(?:OUTER\\s+)?|INNER\\s+|FULL\\s+(?:OUTER\\s+)?|CROSS\\s+)?JOIN\\b";
-const JOIN_START = new RegExp(`^${JOIN_ALTERNATION}`, "i");
+const JOIN_KEYWORD =
+  "(?:NATURAL\\s+)?(?:LEFT\\s+(?:OUTER\\s+)?|RIGHT\\s+(?:OUTER\\s+)?|INNER\\s+|FULL\\s+(?:OUTER\\s+)?|CROSS\\s+)?JOIN";
 /** A JOIN clause: join type, table, and the optional ON conditions. */
 const JOIN_CLAUSE = new RegExp(
-  `^(${JOIN_ALTERNATION})\\s+([\\s\\S]+?)(?:\\s+ON\\s+([\\s\\S]+))?$`,
+  `^(${JOIN_KEYWORD})\\s+([\\s\\S]+?)(?:\\s+ON\\s+([\\s\\S]+))?$`,
   "i",
 );
 /**
- * Quoted text: '...' literals and "..." identifiers (doubled quote escapes);
- * an unterminated quote runs to the end of the text.
+ * Clause keywords in statement order. The FROM of `IS [NOT] DISTINCT FROM`
+ * is an operator, not a clause.
  */
-const QUOTED = `'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?`;
-const QUOTED_PATTERN = new RegExp(QUOTED, "g");
-/** Quoted text, block comments and line comments, whichever starts first. */
-const QUOTED_OR_COMMENT = new RegExp(
-  `${QUOTED}|[ \\t]*(?:/\\*[\\s\\S]*?\\*/|--[^\\n]*)`,
-  "g",
+const CLAUSE_KEYWORDS = `SELECT|(?<!\\bIS\\s+(?:NOT\\s+)?DISTINCT\\s+)FROM|${JOIN_KEYWORD}|WHERE|GROUP\\s+BY|HAVING|WINDOW|ORDER\\s+BY|LIMIT|OFFSET|FETCH\\s+(?:FIRST|NEXT)|FOR\\s+(?:UPDATE|SHARE|NO\\s+KEY\\s+UPDATE|KEY\\s+SHARE)|RETURNING`;
+/** Position of each clause in a statement; LIMIT and OFFSET may swap. */
+const RANKS: Record<string, number> = {
+  select: 1,
+  from: 2,
+  join: 3,
+  where: 4,
+  group: 5,
+  having: 6,
+  window: 7,
+  order: 8,
+  limit: 9,
+  offset: 9,
+  fetch: 10,
+  for: 11,
+  returning: 12,
+};
+/**
+ * Keywords after which a new run of clauses begins (the next SELECT of a set
+ * operation, ON CONFLICT and its DO UPDATE / DO NOTHING action, MERGE ...
+ * WHEN). Appended clauses are placed among the clauses after the last one.
+ * A keyword after a `.` is a column (`t.offset`), never a clause.
+ */
+const BARRIER_KEYWORDS =
+  "UNION|INTERSECT|EXCEPT|ON\\s+CONFLICT|DO\\s+(?:UPDATE|NOTHING)|WHEN";
+const BARRIER = new RegExp(
+  `(?<![\\w$.])(?:${BARRIER_KEYWORDS})(?![\\w$])`,
+  "i",
+);
+const CLAUSE_START = new RegExp(
+  `(?<![\\w$.])(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS})(?![\\w$])`,
+  "gi",
+);
+/** The keyword an appended fragment starts with, if any. */
+const FRAGMENT_START = new RegExp(
+  `^(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS}|AND|OR)\\b`,
+  "i",
 );
 /**
- * Keywords that start a clause the formatter understands. The FROM of
- * `IS [NOT] DISTINCT FROM` is an operator, not a clause.
+ * Text that starts with one of these is a statement or a clause fragment;
+ * anything else (`deleted_at IS NULL`) is a bare condition, and an appended
+ * AND / OR continues it as written instead of starting a WHERE.
  */
-const CLAUSE_KEYWORDS = `SELECT\\b|(?<!\\bDISTINCT\\s+)FROM\\b|${JOIN_ALTERNATION}|WHERE\\b|GROUP\\s+BY\\b|HAVING\\b|ORDER\\s+BY\\b|LIMIT\\b|OFFSET\\b`;
-/** Only text that starts with one of these is parsed and formatted. */
-const FORMATTABLE_START = new RegExp(`^(?:${CLAUSE_KEYWORDS})`, "i");
-const CLAUSE_START = new RegExp(`\\b(?:${CLAUSE_KEYWORDS}|RETURNING\\b)`, "gi");
+const STATEMENT_START = new RegExp(
+  `^(?:SELECT|INSERT|UPDATE|DELETE|WITH|EXPLAIN|MERGE|VALUES|TABLE|${CLAUSE_KEYWORDS})\\b`,
+  "i",
+);
+/** Only text that starts with one of these is formatted by toString(). */
+const FORMATTABLE_START = new RegExp(
+  `^(?:SELECT|FROM|${JOIN_KEYWORD}|WHERE|GROUP\\s+BY|HAVING|ORDER\\s+BY|LIMIT|OFFSET)\\b`,
+  "i",
+);
+/** Clauses whose content is a comma-separated list: appending extends it. */
+const LIST_CLAUSES = new Set([
+  "select",
+  "group",
+  "order",
+  "window",
+  "returning",
+]);
+/** Clauses that hold a single value: appending replaces it. */
+const SINGLE_CLAUSES = new Set(["from", "limit", "offset", "fetch"]);
+/** The opener each closer closes: END (by its first letter) closes CASE. */
+const OPENER: Record<string, string> = { ")": "(", "]": "[", e: "c" };
+/** How each database writes placeholder N; `?` is positional. */
+const PLACEHOLDERS = {
+  postgres: "$",
+  mysql: "?",
+  sqlite: "?",
+  mssql: "@p",
+  oracle: ":",
+};
+
+/** Finds the tokens of `text`, in order; the text between them is plain. */
+function scan(text: string): Token[] {
+  const tokens: Token[] = [];
+  TOKEN.lastIndex = 0;
+  for (let m = TOKEN.exec(text); m; m = TOKEN.exec(text)) {
+    const first = m[0][0];
+    const kind =
+      m[0] === "/*" || first === "-"
+        ? "comment"
+        : first === "(" || first === "[" || /^c/i.test(m[0])
+          ? "open"
+          : first === ")" || first === "]" || /^en/i.test(m[0])
+            ? "close"
+            : /^\$\d/.test(m[0])
+              ? "param"
+              : "quoted";
+    let end = TOKEN.lastIndex;
+    if (m[0] === "/*") {
+      // Block comments nest in PostgreSQL.
+      const marker = /\/\*|\*\//g;
+      marker.lastIndex = end;
+      for (let level = 1; level > 0; end = marker.lastIndex) {
+        const found = marker.exec(text);
+        if (!found) {
+          end = text.length;
+          break;
+        }
+        level += found[0] === "/*" ? 1 : -1;
+      }
+    } else if (first === "$" && kind === "quoted") {
+      // $tag$ ... $tag$: runs to the same marker.
+      const close = text.indexOf(m[0], end);
+      end = close < 0 ? text.length : close + m[0].length;
+    }
+    TOKEN.lastIndex = end;
+    tokens.push({ kind, start: m.index, end });
+  }
+  return tokens;
+}
+/**
+ * Returns `text` with comments, quoted text and everything nested in
+ * ( ), [ ] or CASE ... END replaced by spaces. Offsets are unchanged, so
+ * keywords found on the mask are top-level and can be sliced from `text`.
+ */
+function mask(text: string): string {
+  let masked = "";
+  // The unclosed openers, innermost last: "(", "[" or "c" (CASE).
+  const open: string[] = [];
+  let at = 0;
+  const copy = (from: number, to: number, blank: boolean) => {
+    masked += blank ? " ".repeat(to - from) : text.slice(from, to);
+  };
+  for (const { kind, start, end } of scan(text)) {
+    copy(at, start, open.length > 0);
+    const first = text[start].toLowerCase();
+    // A top-level `$N` stays, and so does an END without CASE (a plain
+    // word); an unmatched ")" or "]" is blanked.
+    copy(
+      start,
+      end,
+      open.length > 0 || (kind === "close" ? first !== "e" : kind !== "param"),
+    );
+    if (kind === "open") open.push(first);
+    // A closer only closes its own kind: `(CASE ...)` does not end the CASE.
+    else if (kind === "close" && open.at(-1) === OPENER[first]) open.pop();
+    at = end;
+  }
+  copy(at, text.length, open.length > 0);
+  return masked;
+}
+/**
+ * Rebuilds `text` token by token: for each token of `kind`, `replace` gets
+ * the token and the text built so far, and returns the text to continue with.
+ */
+function replaceTokens(
+  text: string,
+  kind: Token["kind"],
+  replace: (token: string, before: string) => string,
+): string {
+  let result = "";
+  let at = 0;
+  for (const token of scan(text)) {
+    if (token.kind !== kind) continue;
+    result = replace(
+      text.slice(token.start, token.end),
+      result + text.slice(at, token.start),
+    );
+    at = token.end;
+  }
+  return result + text.slice(at);
+}
+/**
+ * Strips `--` and (nested) block comments with the spaces before them, and
+ * a trailing statement `;`, then trims.
+ */
+function stripComments(text: string): string {
+  // Scanning is only needed when a comment marker is present at all.
+  const stripped = /--|\/\*/.test(text)
+    ? replaceTokens(
+        text,
+        "comment",
+        (comment, before) =>
+          before.replace(/[ \t]+$/, "") + (comment.startsWith("/*") ? " " : ""),
+      )
+    : text;
+  return stripped.replace(/;\s*$/, "").trim();
+}
+/**
+ * The first `$N` token of `text` that starts inside one of the
+ * `[start, end)` offset pairs in `ranges`, or "" if there is none.
+ */
+function findParam(text: string, ranges = [0, text.length]): string {
+  for (const { kind, start, end } of scan(text)) {
+    if (kind !== "param") continue;
+    for (let i = 0; i < ranges.length; i += 2) {
+      if (start >= ranges[i] && start < ranges[i + 1]) {
+        return text.slice(start, end);
+      }
+    }
+  }
+  return "";
+}
+/** Throws when `placeholder` (hand-written) would share numbers with `params`. */
+function assertNotMixed(placeholder: string, params: unknown[]): void {
+  if (placeholder && params.length > 0) {
+    throw new Error(
+      `The hand-written placeholder ${placeholder} cannot be combined with \${value} parameters: their numbers collide. Write \${value} instead of ${placeholder}.`,
+    );
+  }
+}
+/** Normalises a matched clause keyword ("left  join", "ORDER BY") to its key. */
+function clauseKey(keyword: string): string {
+  if (/join$/i.test(keyword)) return "join";
+  const word = keyword.slice(0, keyword.search(/\s|$/)).toLowerCase();
+  return word in RANKS ? word : "barrier";
+}
+/**
+ * Finds the top-level clauses of a statement. After a set operation,
+ * ON CONFLICT or WHEN only the clauses that follow it are returned.
+ */
+function findClauses(text: string, masked: string): Clause[] {
+  const clauses: Clause[] = [];
+  for (const m of masked.matchAll(CLAUSE_START)) {
+    if (clauses.length > 0) clauses[clauses.length - 1].end = m.index;
+    clauses.push({
+      key: clauseKey(m[0]),
+      start: m.index,
+      contentStart: m.index + m[0].length,
+      end: text.length,
+    });
+  }
+  return clauses.slice(clauses.map((c) => c.key).lastIndexOf("barrier") + 1);
+}
+/** True when toString() formats this text (a SELECT or a clause fragment). */
+function isFormattable(text: string, masked: () => string): boolean {
+  return (
+    text === "" || (FORMATTABLE_START.test(text) && !BARRIER.test(masked()))
+  );
+}
+/**
+ * Cuts `text` in front of every top-level match of `pattern` and returns the
+ * trimmed, non-empty pieces.
+ */
+function splitTopLevel(
+  text: string,
+  pattern: RegExp,
+  masked = mask(text),
+): string[] {
+  const starts = [0];
+  for (const m of masked.matchAll(pattern)) starts.push(m.index);
+  return starts
+    .map((start, i) => text.slice(start, starts[i + 1]).trim())
+    .filter((piece) => piece);
+}
+/**
+ * Splits conditions at top-level AND/OR: `a AND b OR c` becomes
+ * ["a", "AND b", "OR c"]. The first entry never carries an operator.
+ */
+function splitConditions(conditions: string): string[] {
+  // The AND of "BETWEEN x AND y" is not a logical operator: blank it.
+  const masked = mask(conditions).replace(/\bBETWEEN\s[\s\S]+?\sAND\b/gi, (m) =>
+    " ".repeat(m.length),
+  );
+  // `$` guards placeholders such as "$and", `.` columns such as `t.and`.
+  return splitTopLevel(conditions, /(?<![\w$.])(?:AND|OR)\b/gi, masked).map(
+    (piece, i) => {
+      const [, operator, condition] = piece.match(
+        /^(?:(AND|OR)\b\s*)?([\s\S]*)$/i,
+      ) as RegExpMatchArray;
+      return i === 0 || !operator
+        ? condition
+        : `${operator.toUpperCase()} ${condition}`.trim();
+    },
+  );
+}
+/** Splits a comma-separated list at top-level commas into non-empty items. */
+function splitCommas(list: string): string[] {
+  return splitTopLevel(list, /,/g)
+    .map((item) => item.replace(/^,/, "").trim())
+    .filter((item) => item);
+}
+/** Parenthesises a condition with a top-level OR, so AND can be put next to it. */
+function wrapOr(condition: string): string {
+  return splitConditions(condition).some((part) => /^OR\b/.test(part))
+    ? `(${condition})`
+    : condition;
+}
+/**
+ * Formats a JOIN clause: the join type on its own line, then the table with
+ * its first ON condition, then one line per further AND/OR.
+ */
+function formatJoin(joinClause: string): string[] {
+  const match = joinClause.match(JOIN_CLAUSE);
+  if (!match) return [joinClause];
+  const [, joinType, table, on] = match;
+  if (!on) return [joinType, `  ${table.trim()}`];
+  const [first, ...rest] = splitConditions(on);
+  return [
+    joinType,
+    `  ${table.trim()} ON ${first}`,
+    ...rest.map((condition) => `  ${condition}`),
+  ];
+}
+/**
+ * Recursively formats a SELECT field, expanding function calls onto multiple
+ * indented lines. Single-arg "*" functions (e.g., count(*)) and empty-arg
+ * functions (e.g., now()) stay on a single line.
+ */
+function formatField(field: string, indent: number): string[] {
+  const prefix = " ".repeat(indent);
+  // Set a window function's top-level "OVER ..." aside first; the greedy
+  // call regex below would otherwise swallow its parentheses as arguments.
+  const over = mask(field).search(/\bOVER\b/i);
+  const core = over < 0 ? field : field.slice(0, over).trimEnd();
+  const overSuffix = over < 0 ? "" : ` ${field.slice(over).trim()}`;
+
+  const call = core.match(/^(\w+)\s*\(([\s\S]*)\)(.*)$/);
+  if (!call) return [prefix + field];
+  const [, name, argList, alias] = call;
+  const args = splitCommas(argList);
+  if (args.length === 0 || (args.length === 1 && args[0] === "*")) {
+    return [prefix + field];
+  }
+  return [
+    `${prefix}${name}(`,
+    ...args.flatMap((arg, i) =>
+      formatField(i < args.length - 1 ? `${arg},` : arg, indent + 2),
+    ),
+    `${prefix})${alias}${overSuffix}`,
+  ];
+}
+/** Formats a comma-separated list: one item per indented line. */
+function formatList(items: string[]): string {
+  return `  ${items.join(",\n  ")}`;
+}
+/**
+ * Formats a WHERE/HAVING condition block: conditions indented 2, AND/OR
+ * operators on their own lines.
+ */
+function formatConditions(content: string): string[] {
+  const [first, ...rest] = splitConditions(content);
+  return [
+    `  ${first}`,
+    ...rest.flatMap((condition) => {
+      const operator = condition.split(" ", 1)[0];
+      return [operator, `  ${condition.slice(operator.length).trim()}`];
+    }),
+  ];
+}
+/** Formats one clause as lines; `[]` when it has nothing to show. */
+function formatClause(key: string, keyword: string, content: string): string[] {
+  const title = keyword.toUpperCase().replace(/\s+/g, " ");
+  if (key === "join") return formatJoin(`${keyword} ${content}`);
+  if (!content) return key === "for" ? [title] : [];
+  switch (key) {
+    case "select": {
+      const fields = splitCommas(content);
+      return [
+        title,
+        ...fields.flatMap((field, i) =>
+          formatField(i < fields.length - 1 ? `${field},` : field, 2),
+        ),
+      ];
+    }
+    case "where":
+    case "having":
+      return [title, ...formatConditions(content)];
+    case "group":
+    case "order":
+      return [title, formatList(splitCommas(content))];
+    case "from":
+    case "window":
+      return [title, `  ${content}`];
+    default:
+      // LIMIT, OFFSET, FETCH and FOR stay on a single line.
+      return [`${title} ${content}`];
+  }
+}
+/**
+ * SQL text reduced to what must survive formatting: whitespace collapsed,
+ * keyword case folded, quoted text kept exactly. Two texts with the same
+ * signature differ in layout only. Empty list items (`a,, b`, `a, FROM`)
+ * are ignored, since the formatter drops them.
+ */
+function signature(text: string): string {
+  const quoted: string[] = [];
+  return (
+    replaceTokens(text, "quoted", (token, before) => {
+      quoted.push(token);
+      return `${before}''`;
+    })
+      .toUpperCase()
+      .replace(
+        /,(?=\s*(?:,|$|(?:FROM|WHERE|GROUP|HAVING|WINDOW|ORDER|LIMIT|OFFSET|FETCH|FOR)\b))|(?<=\b(?:SELECT|BY)\s*),/g,
+        " ",
+      )
+      .replace(/\s*([(),[\]])\s*/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim() + quoted.join("\n")
+  );
+}
 /**
  * Represents an SQL query with support for parameterization and incremental building.
  * Provides methods to parse, append, format, and retrieve the query string and parameters.
  */
 export class SQLQuery {
-  /** The different parts of the SQL query, parsed into categories. */
-  private parts: QueryParts;
-  /** The parameter values; `$N` refers to `params[N - 1]`. */
-  private params: unknown[];
   /**
-   * The verbatim SQL text (comments stripped, `${}` values already lifted to
-   * `$N` placeholders). It is what a raw-passthrough query renders as, and
-   * what nesting inlines; empty once clauses were appended to a parsed query.
+   * The statement as SQL text: comments stripped, `${}` values lifted to
+   * `$N` placeholders, appended clauses already in their place.
    */
-  private raw: string;
+  private text = "";
+  /** The parameter values; `$N` refers to `params[N - 1]`. */
+  private params: unknown[] = [];
+  /** `mask(text)`, computed on first use and kept in step by `splice`. */
+  private masked: string | null = null;
+  /** The condition clause an AND/OR fragment continues: join, where or having. */
+  private lastCondition = "";
+  /** The first `$N` the author wrote by hand, or "": see `assertNotMixed`. */
+  private handWritten = "";
   /**
    * Creates a new SQLQuery instance.
    * If called with template literals, it interpolates values and parses the initial query string.
@@ -146,62 +525,61 @@ export class SQLQuery {
    * @param values - Values to be interpolated into the query.
    */
   constructor(strings?: TemplateStringsArray, ...values: unknown[]) {
-    this.parts = {
-      select: [],
-      from: null,
-      joins: [],
-      where: [],
-      groupBy: [],
-      having: [],
-      orderBy: [],
-      limit: null,
-      offset: null,
-      returning: [],
-      isRawPassthrough: false,
-    };
-    this.params = [];
-    this.raw = "";
     if (strings && strings.raw.length > 0) {
-      const { text, params } = this._interpolate(strings, values, []);
+      const { text, params, handWritten } = this._interpolate(
+        strings,
+        values,
+        [],
+      );
+      assertNotMixed(handWritten, params);
       this.params = params;
-      this.parseInitialQuery(text);
+      this.handWritten = handWritten;
+      this.text = stripComments(text);
     }
   }
   /**
    * Interpolates values into the template strings as `$N` placeholders.
-   * A nested SQLQuery is inlined as its own SQL text with its placeholders
-   * shifted past the parameters collected so far (single pass, so a shifted
-   * placeholder can never collide with a not-yet-shifted one).
+   * A nested SQLQuery is inlined as its SQL text with its placeholders
+   * shifted past the parameters collected so far.
    * `undefined` becomes the SQL literal `NULL`.
    *
    * @param strings - Template strings array.
    * @param values - Values to be interpolated.
    * @param startParams - Parameters already collected (not mutated).
-   * @returns The interpolated SQL text and the extended parameter list.
+   * @returns The interpolated SQL text, the extended parameter list and the
+   * first hand-written placeholder ("" if none).
    * @private
    */
   private _interpolate(
     strings: TemplateStringsArray,
     values: unknown[],
     startParams: unknown[],
-  ): { text: string; params: unknown[] } {
+  ): { text: string; params: unknown[]; handWritten: string } {
     let params = startParams;
+    let handWritten = "";
+    // [start, end) offsets of the template's own text, the only place a
+    // hand-written placeholder can come from.
+    const ranges: number[] = [];
+    let dollar = false;
     const text = strings.reduce((result, string, i) => {
+      ranges.push(result.length, result.length + string.length);
+      dollar ||= string.includes("$");
       if (i >= values.length) return result + string;
       const value = values[i];
       if (value instanceof SQLQuery) {
-        const nested = value.raw || value.toString();
+        handWritten ||= value.handWritten;
         const shift = params.length;
         params = params.concat(value.params);
         // Nothing to renumber; keeps building long lists by nesting cheap.
-        if (shift === 0) return result + string + nested;
-        // Mask quoted text so text like 'costs $1' is not renumbered.
-        const { masked, unmask } = this.maskStringLiterals(nested);
+        if (shift === 0) return result + string + value.text;
+        // Only real placeholders move: `$1` inside quotes is not a token.
         return (
           result +
           string +
-          unmask(
-            masked.replace(/\$(\d+)\b/g, (_m, n) => `$${Number(n) + shift}`),
+          replaceTokens(
+            value.text,
+            "param",
+            (param, before) => `${before}$${Number(param.slice(1)) + shift}`,
           )
         );
       }
@@ -210,367 +588,204 @@ export class SQLQuery {
       params = [...params, value];
       return `${result}${string}$${params.length}`;
     }, "");
-    return { text, params };
+    // Scanning is only needed when the template itself has a `$`.
+    if (!handWritten && dollar) handWritten = findParam(text, ranges);
+    return { text, params, handWritten };
   }
   /**
-   * Parses a query fragment (typically added via `.sql()`) and appends each
-   * clause in it to the matching query part. Fragments appended to
-   * raw-passthrough queries are attached verbatim instead of parsed.
-   *
-   * @param query - The query fragment string to parse and append.
-   */
-  parseQuery(query: string): void {
-    // Strip comments so a trailing "-- note" in a fragment can't comment
-    // out whatever toString() joins after it.
-    const fragment = this.stripComments(query);
-    if (!fragment) return;
-    if (this.parts.isRawPassthrough) {
-      this.raw = this.raw ? `${this.raw}\n${fragment}` : fragment;
-      return;
-    }
-    // Appended clauses may arrive out of statement order, so the verbatim
-    // text is no longer the query; nesting falls back to toString().
-    this.raw = "";
-    for (const piece of this.splitClauses(fragment)) this.addClause(piece);
-  }
-  /**
-   * Adds one clause ("WHERE a = 1", "LEFT JOIN b ON ...", "AND c") or a bare
-   * condition to the matching query part.
-   * @private
-   */
-  private addClause(piece: string): void {
-    if (JOIN_START.test(piece)) {
-      this.parts.joins.push(piece);
-      return;
-    }
-    // Keywords may be followed by any whitespace (newline, tab).
-    const keyword = piece.match(
-      /^(select|from|where|and|or|group\s+by|having|order\s+by|limit|offset|returning)\b/i,
-    );
-    const kw = keyword ? keyword[1].toLowerCase().replace(/\s+/g, " ") : null;
-    const content = keyword ? piece.substring(keyword[0].length).trim() : piece;
-    if (!content) return;
-    switch (kw) {
-      case "select":
-        this.parts.select.push(...this.splitTopLevelCommas(content));
-        break;
-      case "from":
-        this.parts.from = content;
-        break;
-      case "and":
-      case "or":
-        this.parts.where.push(piece);
-        break;
-      case "group by":
-        this.parts.groupBy.push(content);
-        break;
-      case "having":
-        this.appendAnd(this.parts.having, content);
-        break;
-      case "order by":
-        this.parts.orderBy.push(content);
-        break;
-      case "limit":
-        this.parts.limit = content;
-        break;
-      case "offset":
-        this.parts.offset = content;
-        break;
-      case "returning":
-        this.parts.returning.push(content);
-        break;
-      default:
-        // "WHERE ..." or a bare condition: AND it onto the existing WHERE.
-        this.appendAnd(this.parts.where, content);
-    }
-  }
-  /**
-   * Appends a condition the builder itself joins with AND. Either side that
-   * contains a top-level OR is parenthesised, so the OR cannot escape the
-   * filter on the other side (`a OR b` + `c` -> `(a OR b) AND c`).
-   * @private
-   */
-  private appendAnd(list: string[], condition: string): void {
-    if (list.length === 0) {
-      list.push(condition);
-      return;
-    }
-    const hasTopLevelOr = (s: string) =>
-      this.splitConditions(s).some((p) => /^OR\b/i.test(p));
-    const existing = list.join(" ");
-    if (hasTopLevelOr(existing)) list.splice(0, list.length, `(${existing})`);
-    list.push(`AND ${hasTopLevelOr(condition) ? `(${condition})` : condition}`);
-  }
-  /**
-   * Strips `--` and `/* *\/` comments (with the whitespace before them) and
-   * a trailing statement `;`, then trims. Quoted text is matched by the same
-   * scan, so comment markers inside it — and quotes inside comments — are
-   * never misread.
-   * @private
-   */
-  private stripComments(query: string): string {
-    return query
-      .replace(QUOTED_OR_COMMENT, (m) =>
-        /^['"]/.test(m) ? m : m.trimStart().startsWith("/*") ? " " : "",
-      )
-      .replace(/;\s*$/, "")
-      .trim();
-  }
-  /**
-   * Parses the initial SQL text given to the constructor or `sql` tag.
-   * Only text that starts with a SELECT-statement clause keyword is parsed
-   * and formatted. Everything else — DML, DDL, WITH, VALUES, EXPLAIN, set
-   * operations, bare fragments like `a = $1` — is kept verbatim, so the
-   * SELECT-centric formatter can never corrupt it.
+   * Sets the statement text (comments and a trailing `;` are stripped).
    *
    * @param query - The initial SQL query string.
    */
   parseInitialQuery(query: string): void {
-    const text = this.stripComments(query);
+    const handWritten = query.includes("$") ? findParam(query) : "";
+    assertNotMixed(handWritten, this.params);
+    this.handWritten = handWritten;
+    this.text = stripComments(query);
+    this.masked = null;
+    this.lastCondition = "";
+  }
+  /**
+   * Appends a fragment (typically added via `.sql()`). Each clause in it is
+   * put where the statement expects it; a fragment that is not a clause
+   * (`SET ...`, `ON CONFLICT ...`, `UNION ...`) is attached as written.
+   *
+   * @param query - The query fragment string to append.
+   * @throws {Error} If a clause could go in more than one place, or if a
+   * hand-written `$N` meets `${value}` parameters.
+   */
+  parseQuery(query: string): void {
+    const handWritten =
+      this.handWritten || (query.includes("$") ? findParam(query) : "");
+    assertNotMixed(handWritten, this.params);
+    this.handWritten = handWritten;
+    this.append(query);
+  }
+  /**
+   * Appends a fragment whose placeholders were already checked.
+   * @private
+   */
+  private append(query: string): void {
+    // Comments are stripped so a trailing "-- note" in a fragment can't
+    // comment out whatever follows it.
+    const fragment = stripComments(query);
+    if (!fragment) return;
+    const masked = mask(fragment);
+    // In a SELECT a fragment without keyword is a condition for WHERE.
+    const builder = isFormattable(this.text, () => this.mask);
+    if (BARRIER.test(masked) || (!builder && !FRAGMENT_START.test(fragment))) {
+      // A barrier starts a new run of clauses: AND / OR follows its conditions.
+      if (BARRIER.test(masked)) this.lastCondition = "";
+      this.splice(this.text.length, this.text.length, fragment);
+      return;
+    }
+    for (const piece of splitTopLevel(fragment, CLAUSE_START, masked)) {
+      this.place(piece);
+    }
+  }
+  /**
+   * Puts one clause ("WHERE a = 1", "LEFT JOIN b ON ...", "AND c") or a bare
+   * condition in its place in the statement text.
+   * @private
+   */
+  private place(piece: string): void {
+    let keyword = piece.match(FRAGMENT_START)?.[0] ?? "";
+    let content = piece.slice(keyword.length).trim();
+    const clauses = findClauses(this.text, this.mask);
+    const textOf = (c: Clause) => this.text.slice(c.contentStart, c.end).trim();
+
+    if (/^(?:and|or)$/i.test(keyword)) {
+      if (!content) return;
+      const conditions = clauses.filter(
+        (c) =>
+          c.key === "where" ||
+          c.key === "having" ||
+          (c.key === "join" && /\bON\b/i.test(mask(textOf(c)))),
+      );
+      const target =
+        conditions.filter((c) => c.key === this.lastCondition).at(-1) ??
+        conditions.at(-1);
+      if (target) {
+        // A JOIN's text runs on over the FROM items after it: `ON ..., c`.
+        const comma =
+          target.key === "join"
+            ? this.mask.slice(target.contentStart, target.end).indexOf(",")
+            : -1;
+        const at = comma < 0 ? target.end : target.contentStart + comma;
+        this.splice(at, at, piece);
+        return;
+      }
+      // A bare condition is continued as written.
+      if (this.text && !STATEMENT_START.test(this.text)) {
+        this.splice(this.text.length, this.text.length, piece);
+        return;
+      }
+      // No condition yet, in any statement: this one starts the WHERE.
+      keyword = "";
+    }
+    if (!keyword) [keyword, content] = ["WHERE", content || piece];
+    const key = clauseKey(keyword);
+    if (!content && key !== "for") return;
+
+    const ranks = clauses.map((c) => RANKS[c.key]);
+    const single = clauses.filter((c) => c.key !== "join" && c.key !== "for");
     if (
-      text &&
-      (!FORMATTABLE_START.test(text) ||
-        /\b(?:UNION|INTERSECT|EXCEPT)\b/i.test(
-          text.replace(QUOTED_PATTERN, ""),
-        ))
+      RANKS[key] <= Math.max(...ranks) &&
+      (ranks.some((rank, i) => rank < ranks[i - 1]) ||
+        new Set(single.map((c) => c.key)).size < single.length)
     ) {
-      this.parts.isRawPassthrough = true;
+      throw new Error(
+        `Ambiguous place for "${keyword}": the statement repeats clauses or has them out of order. Write this clause in the statement text instead.`,
+      );
     }
-    this.raw = text;
-    if (this.parts.isRawPassthrough) return;
-    for (const piece of this.splitClauses(text)) this.addClause(piece);
-  }
-  /**
-   * Cuts `text` in front of every top-level match of `pattern` and returns
-   * the trimmed, non-empty pieces. Matches are located on `mask` (same
-   * length as `text`), so those inside parentheses or quotes don't count.
-   * @private
-   */
-  private splitTopLevel(
-    text: string,
-    pattern: RegExp,
-    mask = this.maskParenGroups(text),
-  ): string[] {
-    const starts = [0];
-    for (const m of mask.matchAll(pattern)) starts.push(m.index);
-    return starts
-      .map((start, i) => text.slice(start, starts[i + 1]).trim())
-      .filter((piece) => piece);
-  }
-  /**
-   * Splits SQL text into its top-level clauses ("SELECT a", "FROM t", ...).
-   * Text before the first keyword (a bare condition) is its own piece.
-   * @private
-   */
-  private splitClauses(text: string): string[] {
-    return this.splitTopLevel(text, CLAUSE_START);
-  }
-  /**
-   * Splits conditions at top-level AND/OR: `a AND b OR c` becomes
-   * ["a", "AND b", "OR c"]. The first entry never carries an operator.
-   * @private
-   */
-  private splitConditions(conditions: string): string[] {
-    // The AND of "BETWEEN x AND y" is not a logical operator: blank it.
-    const mask = this.maskParenGroups(conditions).replace(
-      /\bBETWEEN\s[\s\S]+?\sAND\b/gi,
-      (m) => " ".repeat(m.length),
-    );
-    // `$` guards placeholders such as "$and"; \b alone would split there.
-    return this.splitTopLevel(conditions, /(?<![\w$])(?:AND|OR)\b/gi, mask).map(
-      (piece, i) => {
-        const [, operator, condition] = piece.match(
-          /^(?:(AND|OR)\b\s*)?([\s\S]*)$/i,
-        ) as RegExpMatchArray;
-        return i === 0 || !operator
-          ? condition
-          : `${operator.toUpperCase()} ${condition}`.trim();
-      },
-    );
-  }
-  /**
-   * Splits a comma-separated list (SELECT fields, function arguments,
-   * ORDER BY terms) at top-level commas into trimmed, non-empty items.
-   * @private
-   */
-  private splitTopLevelCommas(list: string): string[] {
-    return this.splitTopLevel(list, /,/g)
-      .map((item) => item.replace(/^,/, "").trim())
-      .filter((item) => item);
-  }
-  /**
-   * Masks quoted text ('...' literals and "..." identifiers) by replacing
-   * each with a placeholder. Returns the masked string plus an `unmask(t)`
-   * function that restores the originals. Used so that AND/OR/commas/`$N`
-   * inside quotes are not misinterpreted.
-   * Out of scope: dollar-quoting `$$...$$` and E'...' C-escapes.
-   * @private
-   */
-  private maskStringLiterals(s: string): {
-    masked: string;
-    unmask: (t: string) => string;
-  } {
-    const map: string[] = [];
-    const masked = s.replace(QUOTED_PATTERN, (m) => `S${map.push(m) - 1}`);
-    const unmask = (t: string) =>
-      t.replace(/S(\d+)/g, (_, n) => map[Number(n)] ?? "");
-    return { masked, unmask };
-  }
-
-  /**
-   * Returns a length-preserving mask of `s` with quoted text and everything
-   * inside parentheses replaced by spaces, so keywords there (ORDER BY inside
-   * `OVER (...)`, subqueries, 'no limit here') are not clause boundaries.
-   * Callers slice the original text by the indices found on the mask.
-   * @private
-   */
-  private maskParenGroups(s: string): string {
-    let depth = 0;
-    return s
-      .replace(QUOTED_PATTERN, (m) => " ".repeat(m.length))
-      .replace(/[()]|[^()]+/g, (m) => {
-        if (m === "(") depth++;
-        // Clamp at 0 so an unmatched ')' doesn't unmask later paren content.
-        else if (m === ")") depth = Math.max(0, depth - 1);
-        else if (depth === 0) return m;
-        return " ".repeat(m.length);
-      });
-  }
-  /**
-   * Formats a JOIN clause: the join type on its own line, then the table
-   * with its first ON condition, then one line per further AND/OR.
-   * @private
-   */
-  private formatJoinClause(joinClause: string): string[] {
-    const match = joinClause.match(JOIN_CLAUSE);
-    if (!match) return [joinClause];
-    const [, joinType, table, on] = match;
-    if (!on) return [joinType, `  ${table.trim()}`];
-    const [first, ...rest] = this.splitConditions(on);
-    return [
-      joinType,
-      `  ${table.trim()} ON ${first}`,
-      ...rest.map((condition) => `  ${condition}`),
-    ];
-  }
-
-  /**
-   * Recursively formats a SELECT field, expanding function calls onto
-   * multiple indented lines. Single-arg "*" functions (e.g., count(*))
-   * and empty-arg functions (e.g., now()) stay on a single line.
-   * @private
-   */
-  private formatSelectField(field: string, indent: number): string[] {
-    const prefix = " ".repeat(indent);
-    // Set a window function's top-level "OVER ..." aside first; the greedy
-    // call regex below would otherwise swallow its parentheses as arguments.
-    const over = this.maskParenGroups(field).search(/\bOVER\b/i);
-    const core = over < 0 ? field : field.slice(0, over).trimEnd();
-    const overSuffix = over < 0 ? "" : ` ${field.slice(over).trim()}`;
-
-    const call = core.match(/^(\w+)\s*\(([\s\S]*)\)(.*)$/);
-    if (!call) return [prefix + field];
-    const [, name, argList, alias] = call;
-    const args = this.splitTopLevelCommas(argList);
-    if (args.length === 0 || (args.length === 1 && args[0] === "*")) {
-      return [prefix + field];
+    const isCondition = key === "where" || key === "having";
+    if (isCondition || (key === "join" && /\bON\b/i.test(mask(content)))) {
+      this.lastCondition = key;
     }
-    return [
-      `${prefix}${name}(`,
-      ...args.flatMap((arg, i) =>
-        this.formatSelectField(
-          i < args.length - 1 ? `${arg},` : arg,
-          indent + 2,
-        ),
-      ),
-      `${prefix})${alias}${overSuffix}`,
-    ];
-  }
 
+    const existing = clauses.find((c) => c.key === key);
+    const merged =
+      !existing || !textOf(existing)
+        ? content
+        : isCondition
+          ? // The builder adds this AND, so an OR on either side is wrapped.
+            `${wrapOr(textOf(existing))}\nAND ${wrapOr(content)}`
+          : LIST_CLAUSES.has(key)
+            ? `${textOf(existing).replace(/,$/, "")}, ${content.replace(/^,\s*/, "")}`
+            : content;
+    if (
+      existing &&
+      (isCondition || LIST_CLAUSES.has(key) || SINGLE_CLAUSES.has(key))
+    ) {
+      const head = this.text.slice(existing.start, existing.contentStart);
+      this.splice(existing.start, existing.end, `${head} ${merged}`);
+      return;
+    }
+    // JOIN and FOR repeat; anything else is new. Insert before the first
+    // clause that comes later in a statement.
+    const next = clauses.find((c) => RANKS[c.key] > RANKS[key]);
+    const at = next ? next.start : this.text.length;
+    this.splice(at, at, `${keyword} ${content}`.trim());
+  }
+  /** The mask of the statement text. */
+  private get mask(): string {
+    this.masked ??= mask(this.text);
+    return this.masked;
+  }
   /**
-   * Formats a WHERE/HAVING-style condition block: the keyword on its own
-   * line, conditions indented 2, AND/OR operators on their own lines.
-   * Returns an empty array when there are no conditions.
+   * Replaces `text[start, end)` by `replacement`, on a line of its own.
+   * The mask is patched instead of recomputed: clause boundaries are
+   * top-level, so the replacement can be masked by itself.
    * @private
    */
-  private formatConditionClause(keyword: string, parts: string[]): string[] {
-    const [first, ...rest] = this.splitConditions(parts.join(" "));
-    if (first === undefined) return [];
-    return [
-      keyword,
-      `  ${first}`,
-      ...rest.flatMap((condition) => {
-        const operator = condition.split(" ", 1)[0];
-        return [operator, `  ${condition.slice(operator.length).trim()}`];
-      }),
-    ];
+  private splice(start: number, end: number, replacement: string): void {
+    const { text, mask: masked } = this;
+    const before = text.slice(0, start).trimEnd();
+    const after = text.slice(end).trimStart();
+    const parts = [
+      [before, masked.slice(0, before.length)],
+      [replacement, mask(replacement)],
+      [after, masked.slice(text.length - after.length)],
+    ].filter(([part]) => part);
+    this.text = parts.map(([part]) => part).join("\n");
+    this.masked = parts.map(([, part]) => part).join("\n");
   }
-
   /**
-   * Formats a comma-separated term list (GROUP BY / ORDER BY): the keyword
-   * on its own line, one term per indented line. Splits only on top-level
-   * commas so function arguments stay intact.
-   * @private
-   */
-  private formatTermListClause(keyword: string, parts: string[]): string[] {
-    const terms = this.splitTopLevelCommas(parts.join(", "));
-    return terms.length === 0 ? [] : [keyword, `  ${terms.join(",\n  ")}`];
-  }
-
-  /**
-   * Returns the formatted, multi-line SQL query string.
-   * Raw-passthrough queries are returned verbatim; SELECT statements and
-   * clause fragments are reformatted clause by clause.
-   * @returns The formatted SQL query string.
+   * Returns the SQL query string. A SELECT statement or clause fragment is
+   * formatted as multi-line SQL; every other statement is returned as
+   * written. Formatting only changes whitespace and keyword case: if the
+   * result would differ in any other way, the text is returned as written.
+   * @returns The SQL query string.
    * @throws {Error} If a RETURNING clause is used with a SELECT statement.
    */
   toString(): string {
-    if (this.parts.isRawPassthrough) return this.raw;
-
-    // SELECT statements cannot include a RETURNING clause. (DML statements
-    // pass through raw above and never reach this guard.)
-    if (this.parts.returning.length > 0) {
+    const text = this.text;
+    if (!isFormattable(text, () => this.mask)) return text;
+    const clauses = findClauses(text, this.mask);
+    if (clauses.some((c) => c.key === "returning")) {
       throw new Error("RETURNING clause cannot be used with SELECT statements");
     }
-
-    const output: string[] = [];
-
-    if (this.parts.select.length > 0) {
-      output.push("SELECT");
-      const last = this.parts.select.length - 1;
-      this.parts.select.forEach((field, i) => {
-        output.push(
-          ...this.formatSelectField(i < last ? `${field},` : field, 2),
-        );
-      });
-    } else if (this.parts.from) {
-      output.push("SELECT");
-      output.push("  *"); // Default SELECT *
-    }
-
-    // FROM
-    if (this.parts.from) {
-      output.push("FROM");
-      output.push(`  ${this.parts.from}`);
-    }
-
-    // JOINs
-    this.parts.joins.forEach((joinClause) => {
-      output.push(...this.formatJoinClause(joinClause));
-    });
-
-    // WHERE / GROUP BY / HAVING / ORDER BY
-    output.push(...this.formatConditionClause("WHERE", this.parts.where));
-    output.push(...this.formatTermListClause("GROUP BY", this.parts.groupBy));
-    output.push(...this.formatConditionClause("HAVING", this.parts.having));
-    output.push(...this.formatTermListClause("ORDER BY", this.parts.orderBy));
-    if (this.parts.limit !== null) output.push(`LIMIT ${this.parts.limit}`);
-    if (this.parts.offset !== null) output.push(`OFFSET ${this.parts.offset}`);
-    return output.join("\n");
+    // A statement that starts at FROM selects everything.
+    const implied =
+      clauses[0]?.key === "from" && !clauses.some((c) => c.key === "select")
+        ? ["SELECT", "  *"]
+        : [];
+    const formatted = [
+      ...implied,
+      ...clauses.flatMap((c) =>
+        formatClause(
+          c.key,
+          text.slice(c.start, c.contentStart),
+          text.slice(c.contentStart, c.end).trim(),
+        ),
+      ),
+    ].join("\n");
+    return signature(formatted) === signature(`${implied.join(" ")} ${text}`)
+      ? formatted
+      : text;
   }
   /**
-   * Gets the formatted SQL query string by calling `toString()`.
-   * Includes validation check from `toString()`.
+   * Gets the SQL query string by calling `toString()`.
    * @returns The SQL query string.
    * @throws {Error} If validation in `toString()` fails.
    */
@@ -587,6 +802,44 @@ export class SQLQuery {
     return [...this.params];
   }
   /**
+   * Returns the query and parameters with placeholders written for another
+   * database: postgres `$1`, mysql and sqlite `?`, mssql `@p1`, oracle `:1`.
+   * For `?` and oracle (whose drivers bind an array by position) the
+   * parameters are listed, and oracle placeholders numbered, in the order the
+   * placeholders occur.
+   *
+   * @param name - The database.
+   * @throws {Error} If `name` is not a known database, if a positional style
+   * meets hand-written `$N` (their values are not known), or as `toString()`.
+   */
+  dialect(name: keyof typeof PLACEHOLDERS): {
+    query: string;
+    parameters: unknown[];
+  } {
+    if (!Object.hasOwn(PLACEHOLDERS, name)) {
+      throw new Error(
+        `Unknown dialect "${name}": use ${Object.keys(PLACEHOLDERS).join(", ")}`,
+      );
+    }
+    const style = PLACEHOLDERS[name];
+    const byPosition = style === "?" || style === ":";
+    if (byPosition && this.handWritten) {
+      throw new Error(
+        `dialect("${name}") binds by position and cannot reorder the hand-written placeholder ${this.handWritten}: write \${value} instead.`,
+      );
+    }
+    const positional: unknown[] = [];
+    const query = replaceTokens(this.toString(), "param", (param, before) => {
+      if (!byPosition) return before + style + param.slice(1);
+      positional.push(this.params[Number(param.slice(1)) - 1]);
+      return before + (style === "?" ? "?" : `:${positional.length}`);
+    });
+    return {
+      query,
+      parameters: byPosition ? positional : [...this.params],
+    };
+  }
+  /**
    * Appends a new SQL fragment to the current query, returning a *new* SQLQuery instance.
    * The original query object remains unchanged (immutability).
    * Uses template literals for the fragment and handles parameter merging.
@@ -594,6 +847,7 @@ export class SQLQuery {
    * @param strings - Template strings array for the fragment.
    * @param values - Values to be interpolated into the fragment.
    * @returns A new SQLQuery instance representing the combined query.
+   * @throws {Error} If a clause in the fragment could go in more than one place.
    *
    * @example
    * ```ts
@@ -604,19 +858,19 @@ export class SQLQuery {
    */
   sql(strings: TemplateStringsArray, ...values: unknown[]): SQLQuery {
     const newQuery = new SQLQuery();
-    // Copy one level deep: the parts hold only strings and string arrays.
-    // (structuredClone was 40% of the time of a typical chained build.)
-    newQuery.parts = Object.fromEntries(
-      Object.entries(this.parts).map(([key, value]) => [
-        key,
-        Array.isArray(value) ? [...value] : value,
-      ]),
-    ) as unknown as QueryParts;
-    newQuery.raw = this.raw;
+    newQuery.text = this.text;
+    newQuery.masked = this.masked;
+    newQuery.lastCondition = this.lastCondition;
     // Number the fragment's parameters after the existing ones.
-    const { text, params } = this._interpolate(strings, values, this.params);
+    const { text, params, handWritten } = this._interpolate(
+      strings,
+      values,
+      this.params,
+    );
+    newQuery.handWritten = this.handWritten || handWritten;
+    assertNotMixed(newQuery.handWritten, params);
     newQuery.params = params;
-    newQuery.parseQuery(text);
+    newQuery.append(text);
     return newQuery;
   }
 }

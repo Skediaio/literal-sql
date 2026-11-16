@@ -3,7 +3,7 @@
 **Write SQL. Add conditionals in JavaScript. Get a query string + parameters —
 pass them to any Postgres client. No DSL, no driver lock-in.**
 
-> **Alpha.** Tested (160+ tests covering every clause variant, value type,
+> **Alpha.** Tested (330+ tests covering every clause variant, value type,
 > nesting shape, passthrough statement, injection channel, and the CLI), but
 > the public API may still change before 1.0.
 
@@ -140,22 +140,20 @@ let query = sql`SELECT * FROM posts WHERE author_id = ${authorId}`;
 query = query.sql`AND ${notDeleted}`;
 ```
 
-## SELECT queries are formatted; everything else passes through raw
+## SELECT queries are formatted; everything else is left as written
 
 For plain `SELECT` queries, `toString()` emits consistently formatted,
 multi-line SQL — one clause per line, terms indented, `AND`/`OR` on their own
-lines — so generated queries are pleasant to read in logs and diffs. `WHERE`,
-`GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, and all `JOIN` variants
-are understood.
+lines — so generated queries are pleasant to read in logs and diffs.
 
-Statements the SELECT-centric formatter can't safely restructure are **never
-touched**: the text you wrote is preserved verbatim (trimmed, `--` line
-comments stripped), with `${}` values still lifted to `$N` parameters. That
-applies to:
+Formatting only ever changes whitespace and keyword case. The result is
+checked against what you wrote; if it would differ in any other way, you get
+your text back unformatted. Quoted text is opaque in every PostgreSQL form:
+`'...'`, `E'...'`, `"..."`, `$$...$$`, `$tag$...$tag$`.
 
-- **DML** — `INSERT`, `UPDATE`, `DELETE` (including `ON CONFLICT DO UPDATE`,
-  `RETURNING`, CASE expressions, ...)
-- **CTEs and set operations** — `WITH`, `UNION`, `INTERSECT`, `EXCEPT`
+Every other statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `WITH`,
+`UNION`, `EXPLAIN`, DDL, ... — is returned exactly as written (trimmed,
+comments stripped), with `${}` values lifted to `$N` parameters.
 
 ```ts
 const del = sql`DELETE FROM sessions WHERE expires_at < ${cutoff} RETURNING id`;
@@ -163,8 +161,73 @@ del.toString();  // "DELETE FROM sessions WHERE expires_at < $1 RETURNING id"
 del.parameters;  // [cutoff]
 ```
 
-Fragments appended with `.sql` onto a passthrough statement are attached
-verbatim below it — the parameter plumbing works the same everywhere.
+## Appended clauses go where the statement expects them
+
+`.sql` works on any statement, not only on `SELECT`. A clause is placed by
+its position in SQL's clause order, whatever the order you append in:
+
+```ts
+let q = sql`UPDATE users SET active = ${false} RETURNING id`;
+q = q.sql`WHERE last_login < ${cutoff}`;
+// UPDATE users SET active = $1
+// WHERE last_login < $2
+// RETURNING id
+
+let report = sql`WITH recent AS (SELECT * FROM orders WHERE day > ${since})
+SELECT * FROM recent ORDER BY total DESC`;
+report = report.sql`WHERE total > ${min}`.sql`LIMIT ${10}`;
+// ... SELECT * FROM recent WHERE total > $2 ORDER BY total DESC LIMIT $3
+```
+
+- A second `WHERE` / `HAVING` is ANDed onto the first, with parentheses
+  around any side that contains an `OR`.
+- `ORDER BY`, `GROUP BY`, `SELECT` and `RETURNING` extend their list;
+  `LIMIT`, `OFFSET` and `FROM` replace the previous value.
+- `AND ...` / `OR ...` continue the condition written last — a `JOIN ... ON`,
+  the `WHERE`, or the `HAVING`. Without one they start the `WHERE`, in any
+  statement.
+- A fragment that is not a clause (`SET ...`, `ON CONFLICT ...`,
+  `UNION ALL SELECT ...`) is attached at the end, as written.
+- After a `UNION` / `INTERSECT` / `EXCEPT`, an `ON CONFLICT`, its
+  `DO UPDATE` / `DO NOTHING`, or a `WHEN`, only the clauses that follow count:
+  a `WHERE` on `INSERT ... ON CONFLICT (a) WHERE p DO UPDATE SET b = 1 WHERE q`
+  is ANDed onto `q`.
+- If a clause could go in more than one place (for example a `WHERE` on
+  `SELECT ... FOR UPDATE LIMIT 1`, whose clauses are out of order), `.sql`
+  throws instead of guessing.
+
+## Other databases
+
+`.query` uses PostgreSQL `$1, $2` placeholders. `dialect(name)` returns the
+query with placeholders for another database: `"postgres"` (`$1`), `"mysql"`
+and `"sqlite"` (`?`), `"mssql"` (`@p1`) or `"oracle"` (`:1`). For `?` and
+Oracle (whose drivers bind an array by position) the parameters are listed,
+and Oracle placeholders numbered, in the order the placeholders occur. That
+differs from `$N` order when a clause was spliced in front of an earlier
+value. These styles throw on hand-written `$N`, whose values they cannot
+reorder:
+
+```ts
+const q = sql`SELECT id, \`name\` FROM users LIMIT ${10}`
+  .sql`WHERE active = ${true}`;
+const { query, parameters } = q.dialect("mysql");
+// SELECT
+//   id,
+//   `name`
+// FROM
+//   users
+// WHERE
+//   active = ?
+// LIMIT ?
+parameters; // [true, 10]
+```
+
+Backtick (`` `name` ``) and bracket (`[name]`) identifiers are understood.
+Not handled: backslash escapes in plain `'...'` strings (MySQL default),
+MySQL `#` comments, and `--`, `/*` or `$1` inside a bracket identifier
+(`[a--b]`): the query is scanned before the dialect is known, and in
+PostgreSQL `[...]` is an array subscript. Use `--` comments, doubled quotes
+(`''`) and plain bracket names.
 
 ## How interpolated values are treated
 
@@ -179,6 +242,10 @@ verbatim below it — the parameter plumbing works the same everywhere.
 > true in SQL (you need `x IS NULL`). The substitution exists so optional
 > values can vanish from the parameter list, but if you meant to filter on
 > null, write `IS NULL` explicitly — or pass `null`, which stays a parameter.
+
+A hand-written placeholder (`WHERE id = $1`) only works in a query without
+`${}` values; mixing both throws, since the numbers would collide. `$1` inside
+quotes or comments is just text.
 
 Because `${value}` can never become SQL text, injection through values is
 architecturally impossible — the test suite locks this in with dedicated
@@ -227,8 +294,9 @@ share, cache, and branch without surprising mutations:
 const base = sql`SELECT * FROM users`;
 const filtered = base.sql`WHERE active = ${true}`;
 
-base.toString();     // "SELECT * FROM users"          — unchanged
-filtered.toString(); // "SELECT * FROM users WHERE active = $1"
+base.toString();     // SELECT * FROM users           — unchanged
+filtered.toString(); // SELECT * FROM users WHERE active = $1
+// (both formatted one clause per line, as shown above)
 ```
 
 ## What it's not
@@ -273,17 +341,19 @@ npm run cli -- --query "SELECT * FROM users" --where "active = true"
 OPTIONS:
   -f, --file FILE       Read base SQL query from FILE
   -q, --query QUERY     Specify SQL query directly
-  --where CONDITION     Add a WHERE clause
-  --and CONDITION       Add an AND condition to the WHERE clause
-  --or CONDITION        Add an OR condition to the WHERE clause
+  --where CONDITION     Add a WHERE clause (ANDed onto an existing WHERE)
+  --and CONDITION       Continue the condition written last (JOIN ... ON,
+                        WHERE or HAVING) with AND; without one, start
+                        the WHERE clause
+  --or CONDITION        Like --and, with OR
   --join TEXT           Add a JOIN clause
   --left-join TEXT      Add a LEFT JOIN clause
   --right-join TEXT     Add a RIGHT JOIN clause
   --inner-join TEXT     Add an INNER JOIN clause
-  --group-by EXPR       Add a GROUP BY clause
-  --order-by EXPR       Add an ORDER BY clause
-  --limit NUMBER        Add a LIMIT clause
-  --offset NUMBER       Add an OFFSET clause
+  --group-by EXPR       Add GROUP BY terms (extends an existing GROUP BY)
+  --order-by EXPR       Add ORDER BY terms (extends an existing ORDER BY)
+  --limit NUMBER        Set the LIMIT (replaces an existing one)
+  --offset NUMBER       Set the OFFSET (replaces an existing one)
   -h, --help            Show this help message
 ```
 
