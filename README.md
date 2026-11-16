@@ -200,9 +200,12 @@ report = report.sql`WHERE total > ${min}`.sql`LIMIT ${10}`;
 
 `.query` uses PostgreSQL `$1, $2` placeholders. `dialect(name)` returns the
 query with placeholders for another database: `"postgres"` (`$1`), `"mysql"`
-and `"sqlite"` (`?`), `"mssql"` (`@p1`) or `"oracle"` (`:1`). For `?` the
-parameters are listed in the order the placeholders occur, which differs from
-`$N` order when a clause was spliced in front of an earlier value:
+and `"sqlite"` (`?`), `"mssql"` (`@p1`) or `"oracle"` (`:1`). For `?` and
+Oracle (whose drivers bind an array by position) the parameters are listed,
+and Oracle placeholders numbered, in the order the placeholders occur. That
+differs from `$N` order when a clause was spliced in front of an earlier
+value. These styles throw on hand-written `$N`, whose values they cannot
+reorder:
 
 ```ts
 const q = sql`SELECT id, \`name\` FROM users LIMIT ${10}`
@@ -220,8 +223,11 @@ parameters; // [true, 10]
 ```
 
 Backtick (`` `name` ``) and bracket (`[name]`) identifiers are understood.
-Not handled: backslash escapes in plain `'...'` strings (MySQL default) and
-MySQL `#` comments; use `--` comments and doubled quotes (`''`).
+Not handled: backslash escapes in plain `'...'` strings (MySQL default),
+MySQL `#` comments, and `--`, `/*` or `$1` inside a bracket identifier
+(`[a--b]`): the query is scanned before the dialect is known, and in
+PostgreSQL `[...]` is an array subscript. Use `--` comments, doubled quotes
+(`''`) and plain bracket names.
 
 ## How interpolated values are treated
 

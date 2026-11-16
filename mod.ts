@@ -84,11 +84,12 @@ interface Clause {
  * or nested: E'...' (backslash escapes), '...', "...", `...` (MySQL,
  * SQLite), line comment,
  * block-comment opener, dollar-quote opener, `$N`, brackets, CASE and END
- * (not after a `.`: `t.end` is a column). An unterminated quote runs to the
+ * (not after a `.` and not part of a word: `t.end` and `case$flag` are
+ * columns; `$` is a word character in identifiers). An unterminated quote runs to the
  * end of the text.
  */
 const TOKEN =
-  /(?<![\w$])E'(?:[^'\\]|\\[\s\S])*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|\b(?<!\.)(?:CASE|END)\b/gi;
+  /(?<![\w$])E'(?:[^'\\]|\\[\s\S]|'')*'?|'[^']*(?:''[^']*)*'?|"[^"]*(?:""[^"]*)*"?|`[^`]*(?:``[^`]*)*`?|--[^\n]*|\/\*|(?<![\w$])\$(?:[A-Z_]\w*)?\$|(?<![\w$])\$\d+|[()[\]]|(?<![\w$.])(?:CASE|END)(?![\w$])/gi;
 /**
  * Matches any JOIN keyword as a unit: bare JOIN, or prefixed with
  * LEFT/RIGHT/FULL [OUTER], INNER or CROSS, optionally preceded by NATURAL.
@@ -129,14 +130,26 @@ const RANKS: Record<string, number> = {
  */
 const BARRIER_KEYWORDS =
   "UNION|INTERSECT|EXCEPT|ON\\s+CONFLICT|DO\\s+(?:UPDATE|NOTHING)|WHEN";
-const BARRIER = new RegExp(`\\b(?<!\\.)(?:${BARRIER_KEYWORDS})\\b`, "i");
+const BARRIER = new RegExp(
+  `(?<![\\w$.])(?:${BARRIER_KEYWORDS})(?![\\w$])`,
+  "i",
+);
 const CLAUSE_START = new RegExp(
-  `\\b(?<!\\.)(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS})\\b`,
+  `(?<![\\w$.])(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS})(?![\\w$])`,
   "gi",
 );
 /** The keyword an appended fragment starts with, if any. */
 const FRAGMENT_START = new RegExp(
   `^(?:${CLAUSE_KEYWORDS}|${BARRIER_KEYWORDS}|AND|OR)\\b`,
+  "i",
+);
+/**
+ * Text that starts with one of these is a statement or a clause fragment;
+ * anything else (`deleted_at IS NULL`) is a bare condition, and an appended
+ * AND / OR continues it as written instead of starting a WHERE.
+ */
+const STATEMENT_START = new RegExp(
+  `^(?:SELECT|INSERT|UPDATE|DELETE|WITH|EXPLAIN|MERGE|VALUES|TABLE|${CLAUSE_KEYWORDS})\\b`,
   "i",
 );
 /** Only text that starts with one of these is formatted by toString(). */
@@ -589,6 +602,8 @@ export class SQLQuery {
     assertNotMixed(handWritten, this.params);
     this.handWritten = handWritten;
     this.text = stripComments(query);
+    this.masked = null;
+    this.lastCondition = "";
   }
   /**
    * Appends a fragment (typically added via `.sql()`). Each clause in it is
@@ -619,6 +634,8 @@ export class SQLQuery {
     // In a SELECT a fragment without keyword is a condition for WHERE.
     const builder = isFormattable(this.text, () => this.mask);
     if (BARRIER.test(masked) || (!builder && !FRAGMENT_START.test(fragment))) {
+      // A barrier starts a new run of clauses: AND / OR follows its conditions.
+      if (BARRIER.test(masked)) this.lastCondition = "";
       this.splice(this.text.length, this.text.length, fragment);
       return;
     }
@@ -638,6 +655,7 @@ export class SQLQuery {
     const textOf = (c: Clause) => this.text.slice(c.contentStart, c.end).trim();
 
     if (/^(?:and|or)$/i.test(keyword)) {
+      if (!content) return;
       const conditions = clauses.filter(
         (c) =>
           c.key === "where" ||
@@ -648,7 +666,18 @@ export class SQLQuery {
         conditions.filter((c) => c.key === this.lastCondition).at(-1) ??
         conditions.at(-1);
       if (target) {
-        this.splice(target.end, target.end, piece);
+        // A JOIN's text runs on over the FROM items after it: `ON ..., c`.
+        const comma =
+          target.key === "join"
+            ? this.mask.slice(target.contentStart, target.end).indexOf(",")
+            : -1;
+        const at = comma < 0 ? target.end : target.contentStart + comma;
+        this.splice(at, at, piece);
+        return;
+      }
+      // A bare condition is continued as written.
+      if (this.text && !STATEMENT_START.test(this.text)) {
+        this.splice(this.text.length, this.text.length, piece);
         return;
       }
       // No condition yet, in any statement: this one starts the WHERE.
@@ -775,10 +804,13 @@ export class SQLQuery {
   /**
    * Returns the query and parameters with placeholders written for another
    * database: postgres `$1`, mysql and sqlite `?`, mssql `@p1`, oracle `:1`.
-   * For `?` the parameters are listed in the order the placeholders occur.
+   * For `?` and oracle (whose drivers bind an array by position) the
+   * parameters are listed, and oracle placeholders numbered, in the order the
+   * placeholders occur.
    *
    * @param name - The database.
-   * @throws {Error} If `name` is not a known database, or as `toString()`.
+   * @throws {Error} If `name` is not a known database, if a positional style
+   * meets hand-written `$N` (their values are not known), or as `toString()`.
    */
   dialect(name: keyof typeof PLACEHOLDERS): {
     query: string;
@@ -790,15 +822,21 @@ export class SQLQuery {
       );
     }
     const style = PLACEHOLDERS[name];
+    const byPosition = style === "?" || style === ":";
+    if (byPosition && this.handWritten) {
+      throw new Error(
+        `dialect("${name}") binds by position and cannot reorder the hand-written placeholder ${this.handWritten}: write \${value} instead.`,
+      );
+    }
     const positional: unknown[] = [];
     const query = replaceTokens(this.toString(), "param", (param, before) => {
-      if (style !== "?") return before + style + param.slice(1);
+      if (!byPosition) return before + style + param.slice(1);
       positional.push(this.params[Number(param.slice(1)) - 1]);
-      return `${before}?`;
+      return before + (style === "?" ? "?" : `:${positional.length}`);
     });
     return {
       query,
-      parameters: style === "?" ? positional : [...this.params],
+      parameters: byPosition ? positional : [...this.params],
     };
   }
   /**

@@ -180,7 +180,12 @@ stdout; parameters (if any) are printed as JSON below the query.
 - Not handled: backslash escapes in plain `'...'` (only with
   `standard_conforming_strings = off`, or MySQL's default; adding them
   would break standard strings such as `'C:\'`), MySQL `#` comments
-  (`#>` is a PostgreSQL operator), and re-formatting of subqueries.
+  (`#>` is a PostgreSQL operator), comments / `$N` inside SQL Server
+  bracket identifiers (scanning happens before `dialect()`, and `[...]` is
+  a PostgreSQL subscript), and re-formatting of subqueries.
+- An appended `AND` / `OR` with no condition to continue starts a `WHERE`
+  only when the text is a statement or clause fragment (`STATEMENT_START`);
+  on a bare condition (`deleted_at IS NULL`) it is attached as written.
 - A hand-written `$N` (a `param` token in template text or in a string given
   to `parseInitialQuery` / `parseQuery`) is fine while the query has no
   `${}` parameters; combining both throws at build time (`handWritten` field).

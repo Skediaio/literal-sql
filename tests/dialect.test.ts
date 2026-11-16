@@ -95,14 +95,21 @@ describe("dialect(): positional parameters follow the text", () => {
       ].join("\n"),
       parameters: ["x", 10],
     });
-    // Numbered styles keep numbers and parameters.
+    // mssql keeps numbers and parameters.
     assertEquals(query.dialect("mssql").parameters, [10, "x"]);
-    assertEquals(
-      query.dialect("oracle").query,
-      ["SELECT", "  *", "FROM", "  t", "WHERE", "  a = :2", "LIMIT :1"].join(
-        "\n",
-      ),
-    );
+    // Oracle drivers bind an array by position: numbered in text order.
+    assertEquals(query.dialect("oracle"), {
+      query: [
+        "SELECT",
+        "  *",
+        "FROM",
+        "  t",
+        "WHERE",
+        "  a = :1",
+        "LIMIT :2",
+      ].join("\n"),
+      parameters: ["x", 10],
+    });
   });
 
   test("$1 in quoted text or dollar quotes is not a placeholder", () => {

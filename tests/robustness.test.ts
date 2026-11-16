@@ -16,6 +16,7 @@ import {
   deepStrictEqual as assertEquals,
   doesNotThrow,
   ok,
+  throws,
 } from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { describe, test } from "node:test";
@@ -753,6 +754,82 @@ describe("Known bugs", () => {
   test("appended SELECT list ends up in WHERE", () => {
     const out = q("FROM t").sql`SELECT a`.toString();
     ok(!/WHERE/.test(out), out);
+  });
+
+  describe("PR #4 review", () => {
+    test("oracle binds were numbered in $N order, not text order", () => {
+      const query = sql`SELECT a FROM t WHERE x = ${1} FETCH FIRST ${2} ROWS ONLY`
+        .sql`WHERE y = ${3}`;
+      const { query: text, parameters } = query.dialect("oracle");
+      ok(/x = :1\s+AND\s+y = :2\s+FETCH FIRST :3/.test(text), text);
+      assertEquals(parameters, [1, 3, 2]);
+    });
+
+    test("positional dialect with hand-written $N gave undefined values", () => {
+      for (const name of ["mysql", "sqlite", "oracle"] as const) {
+        throws(() => q("SELECT a FROM t WHERE x = $1").dialect(name), /\$1/);
+      }
+      assertEquals(
+        q("SELECT a FROM t WHERE x = $1").dialect("mssql").parameters,
+        [],
+      );
+    });
+
+    test("case$flag opened a CASE and hid the rest of the statement", () => {
+      const out = q("SELECT case$flag, end$x FROM t ORDER BY id")
+        .sql`WHERE active`.query;
+      ok(/WHERE\s+active\s+ORDER BY/.test(out), out);
+    });
+
+    test("E-string with '' then \\' was cut short", () => {
+      const text = "SELECT E'a''b\\'--inside' AS note FROM t";
+      assertEquals(norm(q(text).query), norm(text));
+    });
+
+    test("parseInitialQuery kept the old statement's mask", () => {
+      const query = q("SELECT a FROM t");
+      query.toString();
+      query.parseInitialQuery("UPDATE t SET a = 1 RETURNING id");
+      query.parseQuery("WHERE b");
+      assertEquals(
+        query.toString(),
+        "UPDATE t SET a = 1\nWHERE b\nRETURNING id",
+      );
+    });
+
+    test("AND after a barrier continued the previous scope's WHERE", () => {
+      const out = sql`SELECT k FROM a`.sql`WHERE x`
+        .sql`UNION SELECT k FROM b WHERE ok GROUP BY k HAVING count(*) > 1`
+        .sql`AND count(*) < 10`.query;
+      ok(/HAVING count\(\*\) > 1\s+AND count\(\*\) < 10$/.test(out), out);
+    });
+
+    test("empty AND / OR fragment left a dangling AND", () => {
+      for (const base of ["SELECT a FROM t WHERE x", "SELECT a FROM t"]) {
+        assertEquals(
+          q(base).sql`AND ${sql``}`.sql`OR ${sql``}`.query,
+          q(base).query,
+        );
+      }
+    });
+
+    test("AND on a JOIN landed after the FROM items that follow it", () => {
+      const out = q("SELECT * FROM a JOIN b ON a.id = b.id, c")
+        .sql`AND b.active`.query;
+      assertEquals(
+        norm(out),
+        norm("SELECT * FROM a JOIN b ON a.id = b.id AND b.active, c"),
+      );
+    });
+
+    test("AND on a bare condition started a second WHERE", () => {
+      const condition = sql`deleted_at IS NULL`.sql`AND author_id = ${7}`;
+      assertEquals(condition.query, "deleted_at IS NULL\nAND author_id = $1");
+      const out = sql`SELECT * FROM p WHERE ${condition}`.query;
+      assertEquals(out.match(/WHERE/g)?.length, 1, out);
+      // A statement without condition still gets its WHERE.
+      ok(/WHERE b = \$1/.test(sql`UPDATE t SET a = 1`.sql`AND b = ${2}`.query));
+    });
   });
 
   describe("CLI", () => {
